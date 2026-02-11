@@ -40,6 +40,7 @@ export interface SettingsConfig {
 	editorPaddingX: number;
 	autocompleteMaxVisible: number;
 	quietStartup: boolean;
+	hideStartupResources: boolean;
 	clearOnShrink: boolean;
 }
 
@@ -61,6 +62,7 @@ export interface SettingsCallbacks {
 	onEditorPaddingXChange: (padding: number) => void;
 	onAutocompleteMaxVisibleChange: (maxVisible: number) => void;
 	onQuietStartupChange: (enabled: boolean) => void;
+	onHideStartupResourcesChange: (enabled: boolean) => void;
 	onClearOnShrinkChange: (enabled: boolean) => void;
 	onCancel: () => void;
 }
@@ -179,8 +181,15 @@ export class SettingsSelectorComponent extends Container {
 			{
 				id: "quiet-startup",
 				label: "Quiet startup",
-				description: "Disable verbose printing at startup",
+				description: "Disable verbose startup cards and startup listing",
 				currentValue: config.quietStartup ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "hide-startup-resources",
+				label: "Hide startup resources",
+				description: "Hide [Context]/[Skills]/[Prompts]/[Extensions]/[Themes] listing",
+				currentValue: config.hideStartupResources ? "true" : "false",
 				values: ["true", "false"],
 			},
 			{
@@ -362,6 +371,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "quiet-startup":
 						callbacks.onQuietStartupChange(newValue === "true");
+						break;
+					case "hide-startup-resources":
+						callbacks.onHideStartupResourcesChange(newValue === "true");
 						break;
 					case "double-escape-action":
 						callbacks.onDoubleEscapeActionChange(newValue as "fork" | "tree");

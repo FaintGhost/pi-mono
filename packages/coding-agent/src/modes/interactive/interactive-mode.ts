@@ -835,7 +835,9 @@ export class InteractiveMode {
 		force?: boolean;
 		showDiagnosticsWhenQuiet?: boolean;
 	}): void {
-		const showListing = options?.force || this.options.verbose || !this.settingsManager.getQuietStartup();
+		const showListing =
+			(options?.force || this.options.verbose || !this.settingsManager.getQuietStartup()) &&
+			!this.settingsManager.getHideStartupResources();
 		const showDiagnostics = showListing || options?.showDiagnosticsWhenQuiet === true;
 		if (!showListing && !showDiagnostics) {
 			return;
@@ -2991,6 +2993,7 @@ export class InteractiveMode {
 					editorPaddingX: this.settingsManager.getEditorPaddingX(),
 					autocompleteMaxVisible: this.settingsManager.getAutocompleteMaxVisible(),
 					quietStartup: this.settingsManager.getQuietStartup(),
+					hideStartupResources: this.settingsManager.getHideStartupResources(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 				},
 				{
@@ -3058,6 +3061,9 @@ export class InteractiveMode {
 					},
 					onQuietStartupChange: (enabled) => {
 						this.settingsManager.setQuietStartup(enabled);
+					},
+					onHideStartupResourcesChange: (enabled) => {
+						this.settingsManager.setHideStartupResources(enabled);
 					},
 					onDoubleEscapeActionChange: (action) => {
 						this.settingsManager.setDoubleEscapeAction(action);

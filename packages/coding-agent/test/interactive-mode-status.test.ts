@@ -67,6 +67,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 
 	function createShowLoadedResourcesThis(options: {
 		quietStartup: boolean;
+		hideStartupResources?: boolean;
 		verbose?: boolean;
 		skills?: Array<{ filePath: string }>;
 		skillDiagnostics?: Array<{ type: "warning" | "error" | "collision"; message: string }>;
@@ -76,6 +77,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			chatContainer: new Container(),
 			settingsManager: {
 				getQuietStartup: () => options.quietStartup,
+				getHideStartupResources: () => options.hideStartupResources ?? false,
 			},
 			session: {
 				promptTemplates: [],
@@ -131,6 +133,21 @@ describe("InteractiveMode.showLoadedResources", () => {
 
 		const output = renderAll(fakeThis.chatContainer);
 		expect(output).toContain("[Skill conflicts]");
+		expect(output).not.toContain("[Skills]");
+	});
+
+	test("hides startup resource listing when hideStartupResources is enabled", () => {
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: false,
+			hideStartupResources: true,
+			skills: [{ filePath: "/tmp/skill/SKILL.md" }],
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+		});
+
+		const output = renderAll(fakeThis.chatContainer);
 		expect(output).not.toContain("[Skills]");
 	});
 });

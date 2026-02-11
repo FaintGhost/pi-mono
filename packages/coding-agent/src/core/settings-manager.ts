@@ -69,6 +69,7 @@ export interface Settings {
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	quietStartup?: boolean;
+	hideStartupResources?: boolean; // Hide startup resource listing ([Context]/[Skills]/[Prompts]/[Extensions]/[Themes])
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
@@ -517,6 +518,16 @@ export class SettingsManager {
 	setQuietStartup(quiet: boolean): void {
 		this.globalSettings.quietStartup = quiet;
 		this.markModified("quietStartup");
+		this.save();
+	}
+
+	getHideStartupResources(): boolean {
+		return this.settings.hideStartupResources ?? false;
+	}
+
+	setHideStartupResources(hide: boolean): void {
+		this.globalSettings.hideStartupResources = hide;
+		this.markModified("hideStartupResources");
 		this.save();
 	}
 
