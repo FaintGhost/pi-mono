@@ -15,6 +15,7 @@ export { Image, type ImageOptions, type ImageTheme } from "./components/image.js
 export { Input } from "./components/input.js";
 export { Loader } from "./components/loader.js";
 export { type DefaultTextStyle, Markdown, type MarkdownTheme } from "./components/markdown.js";
+export { Panel, type PanelOptions } from "./components/panel.js";
 export { type SelectItem, SelectList, type SelectListTheme } from "./components/select-list.js";
 export { type SettingItem, SettingsList, type SettingsListTheme } from "./components/settings-list.js";
 export { Spacer } from "./components/spacer.js";
