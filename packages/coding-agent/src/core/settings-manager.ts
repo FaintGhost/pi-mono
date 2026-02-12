@@ -189,6 +189,29 @@ export class SettingsManager {
 			delete settings.queueMode;
 		}
 
+		// Codex compatibility alias: model_reasoning_effort -> defaultThinkingLevel
+		if ("model_reasoning_effort" in settings && settings.defaultThinkingLevel === undefined) {
+			const effort = settings.model_reasoning_effort;
+			const map: Record<string, Settings["defaultThinkingLevel"]> = {
+				none: "off",
+				off: "off",
+				minimal: "minimal",
+				low: "low",
+				medium: "medium",
+				high: "high",
+				max: "xhigh",
+				xhigh: "xhigh",
+			};
+			if (typeof effort === "string") {
+				const normalized = effort.trim().toLowerCase();
+				const mapped = map[normalized];
+				if (mapped) {
+					settings.defaultThinkingLevel = mapped;
+				}
+			}
+			delete settings.model_reasoning_effort;
+		}
+
 		// Migrate old skills object format to new array format
 		if (
 			"skills" in settings &&
