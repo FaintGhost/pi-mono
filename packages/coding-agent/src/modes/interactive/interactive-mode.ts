@@ -3003,6 +3003,7 @@ export class InteractiveMode {
 					enableSkillCommands: this.settingsManager.getEnableSkillCommands(),
 					steeringMode: this.session.steeringMode,
 					followUpMode: this.session.followUpMode,
+					transport: this.settingsManager.getTransport(),
 					thinkingLevel: this.session.thinkingLevel,
 					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
 					currentTheme: this.settingsManager.getTheme() || "dark",
@@ -3045,6 +3046,10 @@ export class InteractiveMode {
 					},
 					onFollowUpModeChange: (mode) => {
 						this.session.setFollowUpMode(mode);
+					},
+					onTransportChange: (transport) => {
+						this.settingsManager.setTransport(transport);
+						this.session.agent.setTransport(transport);
 					},
 					onThinkingLevelChange: (level) => {
 						this.session.setThinkingLevel(level);
