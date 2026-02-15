@@ -5,6 +5,7 @@ export {
 	type SessionDeleteResult,
 	type SessionOverview,
 	type SessionSwitchResult,
+	type SupergroupTopicBinding,
 } from "./runtime/agent-pool.js";
 export {
 	type AgentRuntime,
@@ -22,6 +23,10 @@ export {
 	type RpcResponse,
 } from "./runtime/rpc-client.js";
 export {
+	buildSupergroupTopicContextKey,
+	parseSupergroupTopicContextKey,
+} from "./storage/context-key.js";
+export {
 	type SessionDeleteResult as SessionStorageDeleteResult,
 	SessionPathManager,
 	type SessionRotationResult,
@@ -30,7 +35,10 @@ export {
 export {
 	TelegramBotApp,
 	type TelegramBotCommand,
+	type TelegramCommandScope,
+	type TelegramCreatedForumTopic,
 	type TelegramInboundMessage,
 	TelegramLongPollingTransport,
+	type TelegramThreadTarget,
 	type TelegramTransport,
 } from "./telegram.js";

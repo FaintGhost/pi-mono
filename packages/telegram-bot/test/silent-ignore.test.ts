@@ -51,6 +51,7 @@ describe("Scenario 2: 非授权或非私聊消息被静默忽略", () => {
 		await app.handleMessage({
 			chatId: "chat-1",
 			chatType: "private",
+			messageThreadId: null,
 			userId: 9999,
 			text: "hello",
 			messageId: 1,
@@ -59,6 +60,7 @@ describe("Scenario 2: 非授权或非私聊消息被静默忽略", () => {
 		await app.handleMessage({
 			chatId: "chat-2",
 			chatType: "group",
+			messageThreadId: null,
 			userId: 1001,
 			text: "hello",
 			messageId: 2,

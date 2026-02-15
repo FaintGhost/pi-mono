@@ -50,6 +50,7 @@ describe("session command", () => {
 		await app.handleMessage({
 			chatId: "chat-1",
 			chatType: "private",
+			messageThreadId: null,
 			userId: 1001,
 			text: "/session list",
 			messageId: 1,
@@ -98,6 +99,7 @@ describe("session command", () => {
 		await app.handleMessage({
 			chatId: "chat-1",
 			chatType: "private",
+			messageThreadId: null,
 			userId: 1001,
 			text: "/session@my_bot use 3",
 			messageId: 2,
@@ -146,6 +148,7 @@ describe("session command", () => {
 		await app.handleMessage({
 			chatId: "chat-1",
 			chatType: "private",
+			messageThreadId: null,
 			userId: 1001,
 			text: "/session delete 3",
 			messageId: 3,
@@ -194,6 +197,7 @@ describe("session command", () => {
 		await app.handleMessage({
 			chatId: "chat-1",
 			chatType: "private",
+			messageThreadId: null,
 			userId: 1001,
 			text: "/session use 9",
 			messageId: 4,
@@ -242,6 +246,7 @@ describe("session command", () => {
 		await app.handleMessage({
 			chatId: "chat-1",
 			chatType: "private",
+			messageThreadId: null,
 			userId: 1001,
 			text: "/session new",
 			messageId: 5,

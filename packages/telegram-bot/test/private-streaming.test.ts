@@ -50,6 +50,7 @@ describe("Scenario 1: 白名单私聊可对话且流式更新", () => {
 		await app.handleMessage({
 			chatId: "c-1",
 			chatType: "private",
+			messageThreadId: null,
 			userId: 1001,
 			text: "你好",
 			messageId: 1,

@@ -1,11 +1,12 @@
 import { basename } from "path";
 import { logInfo } from "../log.js";
+import { parseSupergroupTopicContextKey } from "../storage/context-key.js";
 import type { SessionPathManager, SessionDeleteResult as StorageSessionDeleteResult } from "../storage/session-path.js";
 import type { AgentRuntime, PromptOptions, PromptResult } from "./agent-runtime.js";
 import { SerialQueue } from "./queue.js";
 
 export interface RuntimeFactory {
-	create(chatId: string, sessionPath: string): AgentRuntime;
+	create(contextId: string, sessionPath: string): AgentRuntime;
 }
 
 export interface SessionOverview {
@@ -24,6 +25,14 @@ export interface SessionDeleteResult {
 	previousActiveSession: string;
 	activeSession: string;
 	remainingSessions: string[];
+}
+
+export interface SupergroupTopicBinding {
+	contextId: string;
+	chatId: string;
+	messageThreadId: number | null;
+	activeSession: string;
+	sessionCount: number;
 }
 
 interface RuntimeEntry {
@@ -55,11 +64,11 @@ export class AgentPool {
 		this.sweepTimer.unref();
 	}
 
-	async runPrompt(chatId: string, message: string, options?: PromptOptions): Promise<PromptResult> {
-		const queue = this.getQueue(chatId);
+	async runPrompt(contextId: string, message: string, options?: PromptOptions): Promise<PromptResult> {
+		const queue = this.getQueue(contextId);
 
 		return queue.enqueue(async () => {
-			const entry = await this.getOrCreateEntry(chatId);
+			const entry = await this.getOrCreateEntry(contextId);
 			entry.lastUsedAt = Date.now();
 			const result = await entry.runtime.prompt(message, options);
 			entry.lastUsedAt = Date.now();
@@ -67,14 +76,14 @@ export class AgentPool {
 		});
 	}
 
-	async reset(chatId: string): Promise<void> {
-		await this.createSession(chatId);
+	async reset(contextId: string): Promise<void> {
+		await this.createSession(contextId);
 	}
 
-	async getSessionOverview(chatId: string): Promise<SessionOverview> {
-		const queue = this.getQueue(chatId);
+	async getSessionOverview(contextId: string): Promise<SessionOverview> {
+		const queue = this.getQueue(contextId);
 		return queue.enqueue(async () => {
-			const state = await this.sessionPaths.getSessionState(chatId);
+			const state = await this.sessionPaths.getSessionState(contextId);
 			return {
 				activeSession: state.activeFileName,
 				sessions: state.sessionFileNames,
@@ -82,19 +91,53 @@ export class AgentPool {
 		});
 	}
 
-	async createSession(chatId: string): Promise<SessionSwitchResult> {
-		const queue = this.getQueue(chatId);
+	async listSupergroupTopicBindings(chatId: string): Promise<SupergroupTopicBinding[]> {
+		const contextIds = await this.sessionPaths.listContextIds();
+		const bindings: SupergroupTopicBinding[] = [];
+
+		for (const contextId of contextIds) {
+			const parsed = parseSupergroupTopicContextKey(contextId);
+			if (!parsed || parsed.chatId !== chatId) {
+				continue;
+			}
+
+			const state = await this.sessionPaths.getSessionState(contextId);
+			bindings.push({
+				contextId,
+				chatId,
+				messageThreadId: parsed.messageThreadId,
+				activeSession: state.activeFileName,
+				sessionCount: state.sessionFileNames.length,
+			});
+		}
+
+		return bindings.sort((left, right) => {
+			if (left.messageThreadId === null && right.messageThreadId === null) {
+				return 0;
+			}
+			if (left.messageThreadId === null) {
+				return -1;
+			}
+			if (right.messageThreadId === null) {
+				return 1;
+			}
+			return left.messageThreadId - right.messageThreadId;
+		});
+	}
+
+	async createSession(contextId: string): Promise<SessionSwitchResult> {
+		const queue = this.getQueue(contextId);
 
 		return queue.enqueue(async () => {
-			const rotated = await this.sessionPaths.rotateSession(chatId);
-			await this.disposeEntry(chatId);
+			const rotated = await this.sessionPaths.rotateSession(contextId);
+			await this.disposeEntry(contextId);
 
 			const result = {
 				previousSession: this.toSessionFileName(rotated.previousPath),
 				nextSession: this.toSessionFileName(rotated.nextPath),
 			};
 			logInfo("session rotated", {
-				chatId,
+				contextId,
 				previousSession: result.previousSession,
 				nextSession: result.nextSession,
 			});
@@ -102,20 +145,20 @@ export class AgentPool {
 		});
 	}
 
-	async switchSession(chatId: string, sessionFileName: string): Promise<SessionSwitchResult> {
-		const queue = this.getQueue(chatId);
+	async switchSession(contextId: string, sessionFileName: string): Promise<SessionSwitchResult> {
+		const queue = this.getQueue(contextId);
 
 		return queue.enqueue(async () => {
-			const switched = await this.sessionPaths.switchSession(chatId, sessionFileName);
+			const switched = await this.sessionPaths.switchSession(contextId, sessionFileName);
 			const result = {
 				previousSession: this.toSessionFileName(switched.previousPath),
 				nextSession: this.toSessionFileName(switched.nextPath),
 			};
 
 			if (switched.previousPath !== switched.nextPath) {
-				await this.disposeEntry(chatId);
+				await this.disposeEntry(contextId);
 				logInfo("session switched", {
-					chatId,
+					contextId,
 					previousSession: result.previousSession,
 					nextSession: result.nextSession,
 				});
@@ -125,18 +168,18 @@ export class AgentPool {
 		});
 	}
 
-	async deleteSession(chatId: string, sessionFileName: string): Promise<SessionDeleteResult> {
-		const queue = this.getQueue(chatId);
+	async deleteSession(contextId: string, sessionFileName: string): Promise<SessionDeleteResult> {
+		const queue = this.getQueue(contextId);
 
 		return queue.enqueue(async () => {
-			const deleted = await this.sessionPaths.deleteSession(chatId, sessionFileName);
+			const deleted = await this.sessionPaths.deleteSession(contextId, sessionFileName);
 			if (deleted.wasActive) {
-				await this.disposeEntry(chatId);
+				await this.disposeEntry(contextId);
 			}
 
 			const result = this.mapDeleteResult(deleted);
 			logInfo("session deleted", {
-				chatId,
+				contextId,
 				deletedSession: result.deletedSession,
 				wasActive: result.wasActive,
 				activeSession: result.activeSession,
@@ -146,11 +189,25 @@ export class AgentPool {
 		});
 	}
 
+	async deleteContext(contextId: string): Promise<void> {
+		const queue = this.getQueue(contextId);
+
+		await queue.enqueue(async () => {
+			await this.disposeEntry(contextId);
+			await this.sessionPaths.deleteContext(contextId);
+			logInfo("context deleted", { contextId });
+		});
+
+		if (queue.isIdle()) {
+			this.queues.delete(contextId);
+		}
+	}
+
 	async sweepIdle(now = Date.now()): Promise<void> {
 		const entries = Array.from(this.entries.entries());
 
-		for (const [chatId, entry] of entries) {
-			const queue = this.queues.get(chatId);
+		for (const [contextId, entry] of entries) {
+			const queue = this.queues.get(contextId);
 			if (queue && !queue.isIdle()) {
 				continue;
 			}
@@ -160,66 +217,66 @@ export class AgentPool {
 				continue;
 			}
 
-			await this.disposeEntry(chatId);
+			await this.disposeEntry(contextId);
 			if (!queue || queue.isIdle()) {
-				this.queues.delete(chatId);
+				this.queues.delete(contextId);
 			}
-			logInfo("runtime swept", { chatId, inactiveForMs });
+			logInfo("runtime swept", { contextId, inactiveForMs });
 		}
 	}
 
 	async dispose(): Promise<void> {
 		clearInterval(this.sweepTimer);
 		const entries = Array.from(this.entries.keys());
-		for (const chatId of entries) {
-			await this.disposeEntry(chatId);
+		for (const contextId of entries) {
+			await this.disposeEntry(contextId);
 		}
 		this.queues.clear();
 	}
 
-	private getQueue(chatId: string): SerialQueue {
-		const existing = this.queues.get(chatId);
+	private getQueue(contextId: string): SerialQueue {
+		const existing = this.queues.get(contextId);
 		if (existing) {
 			return existing;
 		}
 
 		const queue = new SerialQueue();
-		this.queues.set(chatId, queue);
+		this.queues.set(contextId, queue);
 		return queue;
 	}
 
-	private async getOrCreateEntry(chatId: string): Promise<RuntimeEntry> {
-		const existing = this.entries.get(chatId);
+	private async getOrCreateEntry(contextId: string): Promise<RuntimeEntry> {
+		const existing = this.entries.get(contextId);
 		if (existing?.runtime.isAlive()) {
 			return existing;
 		}
 
 		if (existing && !existing.runtime.isAlive()) {
-			await this.disposeEntry(chatId);
+			await this.disposeEntry(contextId);
 		}
 
-		const sessionPath = await this.sessionPaths.getActiveSessionPath(chatId);
-		const runtime = this.runtimeFactory.create(chatId, sessionPath);
+		const sessionPath = await this.sessionPaths.getActiveSessionPath(contextId);
+		const runtime = this.runtimeFactory.create(contextId, sessionPath);
 
 		const entry: RuntimeEntry = {
 			runtime,
 			lastUsedAt: Date.now(),
 		};
 
-		this.entries.set(chatId, entry);
-		logInfo("runtime created", { chatId, sessionPath });
+		this.entries.set(contextId, entry);
+		logInfo("runtime created", { contextId, sessionPath });
 		return entry;
 	}
 
-	private async disposeEntry(chatId: string): Promise<void> {
-		const entry = this.entries.get(chatId);
+	private async disposeEntry(contextId: string): Promise<void> {
+		const entry = this.entries.get(contextId);
 		if (!entry) {
 			return;
 		}
 
-		this.entries.delete(chatId);
+		this.entries.delete(contextId);
 		await entry.runtime.dispose();
-		logInfo("runtime disposed", { chatId });
+		logInfo("runtime disposed", { contextId });
 	}
 
 	private mapDeleteResult(deleted: StorageSessionDeleteResult): SessionDeleteResult {

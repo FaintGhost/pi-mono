@@ -1,7 +1,13 @@
 import type { TelegramBotConfig, TelegramParseMode } from "./config.js";
 import { logError, logInfo, logWarn } from "./log.js";
-import type { SessionDeleteResult, SessionOverview, SessionSwitchResult } from "./runtime/agent-pool.js";
+import type {
+	SessionDeleteResult,
+	SessionOverview,
+	SessionSwitchResult,
+	SupergroupTopicBinding,
+} from "./runtime/agent-pool.js";
 import type { PromptOptions, PromptResult } from "./runtime/agent-runtime.js";
+import { buildSupergroupTopicContextKey } from "./storage/context-key.js";
 
 export interface TelegramInboundMessage {
 	chatId: string;
@@ -9,6 +15,9 @@ export interface TelegramInboundMessage {
 	userId: number;
 	text: string;
 	messageId: number;
+	messageThreadId: number | null;
+	isTopicMessage?: boolean;
+	isForum?: boolean;
 }
 
 export interface TelegramBotCommand {
@@ -16,13 +25,34 @@ export interface TelegramBotCommand {
 	description: string;
 }
 
+export type TelegramCommandScope =
+	| {
+			type: "all_private_chats";
+	  }
+	| {
+			type: "chat_member";
+			chatId: string;
+			userId: number;
+	  };
+
+export interface TelegramThreadTarget {
+	messageThreadId?: number;
+}
+
+export interface TelegramCreatedForumTopic {
+	messageThreadId: number;
+	name: string;
+}
+
 export interface TelegramTransport {
 	start(onMessage: (message: TelegramInboundMessage) => Promise<void>): Promise<void>;
 	stop(): Promise<void>;
-	setCommands(commands: TelegramBotCommand[]): Promise<void>;
-	setTyping(chatId: string): Promise<void>;
-	sendMessage(chatId: string, text: string): Promise<number>;
+	setCommands(commands: TelegramBotCommand[], scope?: TelegramCommandScope): Promise<void>;
+	setTyping(chatId: string, target?: TelegramThreadTarget): Promise<void>;
+	sendMessage(chatId: string, text: string, target?: TelegramThreadTarget): Promise<number>;
 	editMessage(chatId: string, messageId: number, text: string): Promise<void>;
+	createForumTopic(chatId: string, name: string): Promise<TelegramCreatedForumTopic>;
+	deleteForumTopic(chatId: string, messageThreadId: number): Promise<void>;
 }
 
 interface TelegramApiResponse<T> {
@@ -39,9 +69,12 @@ interface TelegramUpdate {
 interface TelegramMessage {
 	message_id: number;
 	text?: string;
+	message_thread_id?: number;
+	is_topic_message?: boolean;
 	chat: {
 		id: number;
 		type: string;
+		is_forum?: boolean;
 	};
 	from?: {
 		id: number;
@@ -52,13 +85,20 @@ interface TelegramSendMessageResult {
 	message_id: number;
 }
 
+interface TelegramForumTopicResult {
+	message_thread_id: number;
+	name: string;
+}
+
 export interface PromptRuntimePool {
-	runPrompt(chatId: string, message: string, options?: PromptOptions): Promise<PromptResult>;
-	reset(chatId: string): Promise<void>;
-	getSessionOverview(chatId: string): Promise<SessionOverview>;
-	createSession(chatId: string): Promise<SessionSwitchResult>;
-	switchSession(chatId: string, sessionFileName: string): Promise<SessionSwitchResult>;
-	deleteSession(chatId: string, sessionFileName: string): Promise<SessionDeleteResult>;
+	runPrompt(contextId: string, message: string, options?: PromptOptions): Promise<PromptResult>;
+	reset(contextId: string): Promise<void>;
+	getSessionOverview(contextId: string): Promise<SessionOverview>;
+	createSession(contextId: string): Promise<SessionSwitchResult>;
+	switchSession(contextId: string, sessionFileName: string): Promise<SessionSwitchResult>;
+	deleteSession(contextId: string, sessionFileName: string): Promise<SessionDeleteResult>;
+	listSupergroupTopicBindings?(chatId: string): Promise<SupergroupTopicBinding[]>;
+	deleteContext?(contextId: string): Promise<void>;
 }
 
 export class TelegramLongPollingTransport implements TelegramTransport {
@@ -94,6 +134,9 @@ export class TelegramLongPollingTransport implements TelegramTransport {
 						userId: message.from.id,
 						text: message.text,
 						messageId: message.message_id,
+						messageThreadId: message.message_thread_id ?? null,
+						isTopicMessage: message.is_topic_message ?? false,
+						isForum: message.chat.is_forum ?? false,
 					});
 				}
 			} catch (error) {
@@ -119,31 +162,54 @@ export class TelegramLongPollingTransport implements TelegramTransport {
 		this.activeController = null;
 	}
 
-	async setCommands(commands: TelegramBotCommand[]): Promise<void> {
-		await this.callApi("setMyCommands", {
+	async setCommands(
+		commands: TelegramBotCommand[],
+		scope: TelegramCommandScope = { type: "all_private_chats" },
+	): Promise<void> {
+		const payload: Record<string, unknown> = {
 			commands: commands.map((command) => ({
 				command: command.command,
 				description: command.description,
 			})),
-			scope: {
-				type: "all_private_chats",
-			},
-		});
+		};
+
+		if (scope.type === "all_private_chats") {
+			payload.scope = { type: "all_private_chats" };
+		} else {
+			payload.scope = {
+				type: "chat_member",
+				chat_id: scope.chatId,
+				user_id: scope.userId,
+			};
+		}
+
+		await this.callApi("setMyCommands", payload);
 	}
 
-	async setTyping(chatId: string): Promise<void> {
-		await this.callApi("sendChatAction", {
+	async setTyping(chatId: string, target?: TelegramThreadTarget): Promise<void> {
+		const payload: Record<string, unknown> = {
 			chat_id: chatId,
 			action: "typing",
-		});
+		};
+
+		if (target?.messageThreadId) {
+			payload.message_thread_id = target.messageThreadId;
+		}
+
+		await this.callApi("sendChatAction", payload);
 	}
 
-	async sendMessage(chatId: string, text: string): Promise<number> {
-		const response = await this.callApiWithOptionalParseMode<TelegramSendMessageResult>("sendMessage", {
+	async sendMessage(chatId: string, text: string, target?: TelegramThreadTarget): Promise<number> {
+		const payload: Record<string, unknown> = {
 			chat_id: chatId,
 			text,
-		});
+		};
 
+		if (target?.messageThreadId) {
+			payload.message_thread_id = target.messageThreadId;
+		}
+
+		const response = await this.callApiWithOptionalParseMode<TelegramSendMessageResult>("sendMessage", payload);
 		return response.message_id;
 	}
 
@@ -160,6 +226,25 @@ export class TelegramLongPollingTransport implements TelegramTransport {
 			}
 			throw error;
 		}
+	}
+
+	async createForumTopic(chatId: string, name: string): Promise<TelegramCreatedForumTopic> {
+		const result = await this.callApi<TelegramForumTopicResult>("createForumTopic", {
+			chat_id: chatId,
+			name,
+		});
+
+		return {
+			messageThreadId: result.message_thread_id,
+			name: result.name,
+		};
+	}
+
+	async deleteForumTopic(chatId: string, messageThreadId: number): Promise<void> {
+		await this.callApi("deleteForumTopic", {
+			chat_id: chatId,
+			message_thread_id: messageThreadId,
+		});
 	}
 
 	private async getUpdates(): Promise<TelegramUpdate[]> {
@@ -262,6 +347,7 @@ export class TelegramBotApp {
 			description: "查看与切换会话",
 		},
 	];
+	private readonly supergroupCommandScopes = new Set<string>();
 
 	constructor(options: { config: TelegramBotConfig; transport: TelegramTransport; pool: PromptRuntimePool }) {
 		this.config = options.config;
@@ -270,7 +356,7 @@ export class TelegramBotApp {
 	}
 
 	async start(): Promise<void> {
-		await this.registerCommands();
+		await this.registerPrivateCommands();
 		logInfo("bot started");
 		await this.transport.start(async (message) => {
 			await this.handleMessage(message);
@@ -283,11 +369,20 @@ export class TelegramBotApp {
 	}
 
 	async handleMessage(message: TelegramInboundMessage): Promise<void> {
-		if (message.chatType !== "private") {
+		if (!this.isSupportedChatType(message.chatType)) {
 			return;
 		}
 
 		if (!this.config.allowedUserIds.has(message.userId)) {
+			return;
+		}
+
+		if (this.isSupergroup(message.chatType) && !this.isSupergroupTopicMessage(message)) {
+			logInfo("supergroup message ignored: no topic markers", {
+				chatId: message.chatId,
+				userId: message.userId,
+				messageId: message.messageId,
+			});
 			return;
 		}
 
@@ -296,22 +391,38 @@ export class TelegramBotApp {
 			return;
 		}
 
+		if (this.isSupergroup(message.chatType)) {
+			await this.ensureSupergroupMemberCommands(message.chatId, message.userId);
+		}
+
 		logInfo("incoming message", {
 			chatId: message.chatId,
 			userId: message.userId,
+			chatType: message.chatType,
+			messageThreadId: message.messageThreadId ?? "none",
 			text: text.slice(0, 80),
 		});
 
 		const command = this.parseCommand(text);
+		const contextId = this.getContextId(message);
+
 		if (command?.name === "reset") {
-			await this.pool.reset(message.chatId);
-			await this.transport.sendMessage(message.chatId, "会话已重置");
-			logInfo("session reset", { chatId: message.chatId, userId: message.userId });
+			await this.pool.reset(contextId);
+			await this.transport.sendMessage(
+				message.chatId,
+				this.isSupergroup(message.chatType) ? "当前 topic 会话已重置" : "会话已重置",
+				this.toThreadTarget(message),
+			);
+			logInfo("session reset", { contextId, userId: message.userId });
 			return;
 		}
 
 		if (command?.name === "session" || command?.name === "sessions") {
-			await this.handleSessionCommand(message.chatId, command.args);
+			if (this.isSupergroup(message.chatType)) {
+				await this.handleSupergroupSessionCommand(message, contextId, command.args);
+			} else {
+				await this.handlePrivateSessionCommand(message.chatId, contextId, command.args);
+			}
 			return;
 		}
 
@@ -319,11 +430,12 @@ export class TelegramBotApp {
 		let latestText = "";
 		let lastEditAt = 0;
 		let renderChain = Promise.resolve();
+		const threadTarget = this.toThreadTarget(message);
 
 		const renderText = async (textToRender: string): Promise<void> => {
 			const normalized = this.normalizeText(textToRender);
 			if (responseMessageId === null) {
-				responseMessageId = await this.transport.sendMessage(message.chatId, normalized);
+				responseMessageId = await this.transport.sendMessage(message.chatId, normalized, threadTarget);
 				return;
 			}
 			await this.transport.editMessage(message.chatId, responseMessageId, normalized);
@@ -342,10 +454,10 @@ export class TelegramBotApp {
 				});
 		};
 
-		const stopTyping = this.startTypingLoop(message.chatId);
+		const stopTyping = this.startTypingLoop(message.chatId, threadTarget);
 
 		try {
-			const result = await this.pool.runPrompt(message.chatId, text, {
+			const result = await this.pool.runPrompt(contextId, text, {
 				onTextUpdate: async (updatedText) => {
 					latestText = updatedText;
 					const now = Date.now();
@@ -363,34 +475,34 @@ export class TelegramBotApp {
 			await renderChain;
 
 			logInfo("message handled", {
-				chatId: message.chatId,
+				contextId,
 				userId: message.userId,
 				responseLength: latestText.length,
 			});
 		} catch (error) {
 			const messageText = error instanceof Error ? error.message : String(error);
 			logError("message handling failed", {
-				chatId: message.chatId,
+				contextId,
 				userId: message.userId,
 				error: messageText,
 			});
 
 			await renderChain.catch((renderError) => {
 				logWarn("render queue failed during error handling", {
-					chatId: message.chatId,
+					contextId,
 					error: renderError instanceof Error ? renderError.message : String(renderError),
 				});
 			});
 
 			try {
 				if (responseMessageId === null) {
-					await this.transport.sendMessage(message.chatId, `请求失败: ${messageText}`);
+					await this.transport.sendMessage(message.chatId, `请求失败: ${messageText}`, threadTarget);
 				} else {
 					await this.transport.editMessage(message.chatId, responseMessageId, `请求失败: ${messageText}`);
 				}
 			} catch (notifyError) {
 				logError("failed to notify user about error", {
-					chatId: message.chatId,
+					contextId,
 					error: notifyError instanceof Error ? notifyError.message : String(notifyError),
 				});
 			}
@@ -399,7 +511,41 @@ export class TelegramBotApp {
 		}
 	}
 
-	private startTypingLoop(chatId: string): () => void {
+	private isSupportedChatType(chatType: string): boolean {
+		return chatType === "private" || chatType === "supergroup";
+	}
+
+	private isSupergroup(chatType: string): boolean {
+		return chatType === "supergroup";
+	}
+
+	private isSupergroupTopicMessage(message: TelegramInboundMessage): boolean {
+		return message.messageThreadId !== null || message.isTopicMessage === true || message.isForum === true;
+	}
+
+	private getContextId(message: TelegramInboundMessage): string {
+		if (!this.isSupergroup(message.chatType)) {
+			return message.chatId;
+		}
+
+		if (!this.isSupergroupTopicMessage(message)) {
+			throw new Error("supergroup topic message is required");
+		}
+
+		return buildSupergroupTopicContextKey(message.chatId, message.messageThreadId);
+	}
+
+	private toThreadTarget(message: TelegramInboundMessage): TelegramThreadTarget | undefined {
+		if (!this.isSupergroup(message.chatType) || message.messageThreadId === null) {
+			return undefined;
+		}
+
+		return {
+			messageThreadId: message.messageThreadId,
+		};
+	}
+
+	private startTypingLoop(chatId: string, target?: TelegramThreadTarget): () => void {
 		let active = true;
 
 		const sendTyping = async () => {
@@ -407,7 +553,7 @@ export class TelegramBotApp {
 				return;
 			}
 			try {
-				await this.transport.setTyping(chatId);
+				await this.transport.setTyping(chatId, target);
 			} catch (error) {
 				logWarn("set typing failed", {
 					chatId,
@@ -429,37 +575,65 @@ export class TelegramBotApp {
 		};
 	}
 
-	private async registerCommands(): Promise<void> {
+	private async registerPrivateCommands(): Promise<void> {
 		try {
-			await this.transport.setCommands(this.commands);
+			await this.transport.setCommands(this.commands, { type: "all_private_chats" });
 			logInfo("commands registered", {
+				scope: "all_private_chats",
 				count: this.commands.length,
 				commands: this.commands.map((command) => command.command).join(","),
 			});
 		} catch (error) {
-			logWarn("failed to register commands", {
+			logWarn("failed to register private commands", {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
 	}
 
-	private async handleSessionCommand(chatId: string, args: string[]): Promise<void> {
+	private async ensureSupergroupMemberCommands(chatId: string, userId: number): Promise<void> {
+		const scopeKey = `${chatId}:${userId}`;
+		if (this.supergroupCommandScopes.has(scopeKey)) {
+			return;
+		}
+
+		try {
+			await this.transport.setCommands(this.commands, {
+				type: "chat_member",
+				chatId,
+				userId,
+			});
+			this.supergroupCommandScopes.add(scopeKey);
+			logInfo("commands registered", {
+				scope: "chat_member",
+				chatId,
+				userId,
+			});
+		} catch (error) {
+			logWarn("failed to register supergroup member commands", {
+				chatId,
+				userId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	private async handlePrivateSessionCommand(chatId: string, contextId: string, args: string[]): Promise<void> {
 		const action = args[0]?.toLowerCase() ?? "status";
 
 		if (action === "status" || action === "current") {
-			const overview = await this.pool.getSessionOverview(chatId);
+			const overview = await this.pool.getSessionOverview(contextId);
 			await this.transport.sendMessage(chatId, this.renderSessionStatus(overview));
 			return;
 		}
 
 		if (action === "list") {
-			const overview = await this.pool.getSessionOverview(chatId);
+			const overview = await this.pool.getSessionOverview(contextId);
 			await this.transport.sendMessage(chatId, this.renderSessionList(overview));
 			return;
 		}
 
 		if (action === "new") {
-			const created = await this.pool.createSession(chatId);
+			const created = await this.pool.createSession(contextId);
 			await this.transport.sendMessage(chatId, `已切换到新会话: ${created.nextSession}`);
 			return;
 		}
@@ -471,14 +645,14 @@ export class TelegramBotApp {
 				return;
 			}
 
-			const overview = await this.pool.getSessionOverview(chatId);
+			const overview = await this.pool.getSessionOverview(contextId);
 			const sessionFileName = this.resolveSessionSelector(selector, overview.sessions);
 			if (!sessionFileName) {
 				await this.transport.sendMessage(chatId, `未找到会话: ${selector}`);
 				return;
 			}
 
-			const switched = await this.pool.switchSession(chatId, sessionFileName);
+			const switched = await this.pool.switchSession(contextId, sessionFileName);
 			if (switched.previousSession === switched.nextSession) {
 				await this.transport.sendMessage(chatId, `当前已在会话: ${switched.nextSession}`);
 				return;
@@ -495,14 +669,14 @@ export class TelegramBotApp {
 				return;
 			}
 
-			const overview = await this.pool.getSessionOverview(chatId);
+			const overview = await this.pool.getSessionOverview(contextId);
 			const sessionFileName = this.resolveSessionSelector(selector, overview.sessions);
 			if (!sessionFileName) {
 				await this.transport.sendMessage(chatId, `未找到会话: ${selector}`);
 				return;
 			}
 
-			const deleted = await this.pool.deleteSession(chatId, sessionFileName);
+			const deleted = await this.pool.deleteSession(contextId, sessionFileName);
 			if (deleted.wasActive) {
 				await this.transport.sendMessage(
 					chatId,
@@ -519,6 +693,106 @@ export class TelegramBotApp {
 		}
 
 		await this.transport.sendMessage(chatId, this.renderSessionHelp());
+	}
+
+	private async handleSupergroupSessionCommand(
+		message: TelegramInboundMessage,
+		contextId: string,
+		args: string[],
+	): Promise<void> {
+		const chatId = message.chatId;
+		const currentThreadId = message.messageThreadId;
+		const threadTarget = this.toThreadTarget(message);
+		const action = args[0]?.toLowerCase() ?? "status";
+
+		if (action === "status" || action === "current") {
+			const overview = await this.pool.getSessionOverview(contextId);
+			await this.transport.sendMessage(
+				chatId,
+				this.renderSupergroupSessionStatus(currentThreadId, overview),
+				threadTarget,
+			);
+			return;
+		}
+
+		if (action === "list") {
+			if (!this.pool.listSupergroupTopicBindings) {
+				await this.transport.sendMessage(chatId, "当前运行时不支持超级群会话列表", threadTarget);
+				return;
+			}
+
+			const bindings = await this.pool.listSupergroupTopicBindings(chatId);
+			await this.transport.sendMessage(
+				chatId,
+				this.renderSupergroupSessionList(chatId, currentThreadId, bindings),
+				threadTarget,
+			);
+			return;
+		}
+
+		if (action === "new") {
+			const topicName = this.generateSessionTopicName();
+			const createdTopic = await this.transport.createForumTopic(chatId, topicName);
+			const createdContextId = buildSupergroupTopicContextKey(chatId, createdTopic.messageThreadId);
+			const createdOverview = await this.pool.getSessionOverview(createdContextId);
+			const deepLink = this.buildTopicDeepLink(chatId, createdTopic.messageThreadId);
+
+			await this.transport.sendMessage(
+				chatId,
+				`已创建新 Topic: ${createdTopic.name}\nSession: ${createdOverview.activeSession}\n打开: ${deepLink}`,
+				threadTarget,
+			);
+			return;
+		}
+
+		if (action === "use") {
+			await this.transport.sendMessage(
+				chatId,
+				"超级群模式下 /session use 已禁用，请直接切换到目标 Topic。",
+				threadTarget,
+			);
+			return;
+		}
+
+		if (action === "delete" || action === "rm") {
+			if (args.length > 1) {
+				await this.transport.sendMessage(chatId, "超级群仅支持删除当前 Topic：/session delete", threadTarget);
+				return;
+			}
+
+			if (currentThreadId === null) {
+				await this.transport.sendMessage(chatId, "General Topic 不支持删除，请切换到其他 Topic。", threadTarget);
+				return;
+			}
+
+			const activeOverview = await this.pool.getSessionOverview(contextId);
+
+			try {
+				await this.transport.deleteForumTopic(chatId, currentThreadId);
+			} catch (error) {
+				const errorText = error instanceof Error ? error.message : String(error);
+				await this.transport.sendMessage(chatId, `删除 Topic 失败，操作已回滚：${errorText}`, threadTarget);
+				return;
+			}
+
+			try {
+				if (this.pool.deleteContext) {
+					await this.pool.deleteContext(contextId);
+				} else {
+					await this.pool.deleteSession(contextId, activeOverview.activeSession);
+				}
+			} catch (error) {
+				logError("session cleanup failed after topic deletion", {
+					contextId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+
+			await this.transport.sendMessage(chatId, `当前 Topic 已删除，原会话: ${activeOverview.activeSession}`);
+			return;
+		}
+
+		await this.transport.sendMessage(chatId, this.renderSupergroupSessionHelp(), threadTarget);
 	}
 
 	private parseCommand(text: string): { name: string; args: string[] } | null {
@@ -555,6 +829,22 @@ export class TelegramBotApp {
 		return matched ?? null;
 	}
 
+	private generateSessionTopicName(): string {
+		const now = new Date();
+		const year = now.getUTCFullYear();
+		const month = `${now.getUTCMonth() + 1}`.padStart(2, "0");
+		const day = `${now.getUTCDate()}`.padStart(2, "0");
+		const hours = `${now.getUTCHours()}`.padStart(2, "0");
+		const minutes = `${now.getUTCMinutes()}`.padStart(2, "0");
+		const seconds = `${now.getUTCSeconds()}`.padStart(2, "0");
+		return `session-${year}${month}${day}-${hours}${minutes}${seconds}`;
+	}
+
+	private buildTopicDeepLink(chatId: string, messageThreadId: number): string {
+		const internalChatId = chatId.startsWith("-100") ? chatId.slice(4) : chatId.replace(/^-/, "");
+		return `https://t.me/c/${internalChatId}/${messageThreadId}`;
+	}
+
 	private renderSessionStatus(overview: SessionOverview): string {
 		return `当前会话: ${overview.activeSession}\n会话总数: ${overview.sessions.length}\n\n${this.renderSessionHelp()}`;
 	}
@@ -576,6 +866,46 @@ export class TelegramBotApp {
 			"/session new - 新建并切换会话",
 			"/session use <编号|文件名> - 切换会话",
 			"/session delete <编号|文件名> - 删除会话",
+		].join("\n");
+	}
+
+	private renderSupergroupSessionStatus(messageThreadId: number | null, overview: SessionOverview): string {
+		const topicLabel = this.formatTopicLabel(messageThreadId);
+		return `当前 Topic: ${topicLabel}\n当前会话: ${overview.activeSession}\n会话总数: ${overview.sessions.length}\n\n${this.renderSupergroupSessionHelp()}`;
+	}
+
+	private renderSupergroupSessionList(
+		chatId: string,
+		currentThreadId: number | null,
+		bindings: SupergroupTopicBinding[],
+	): string {
+		if (bindings.length === 0) {
+			return `当前群暂无 Topic 会话绑定。\n\n${this.renderSupergroupSessionHelp()}`;
+		}
+
+		const rows = bindings.map((binding, index) => {
+			const marker = binding.messageThreadId === currentThreadId ? "*" : " ";
+			const topicLabel = this.formatTopicLabel(binding.messageThreadId);
+			const link = binding.messageThreadId === null ? "" : this.buildTopicDeepLink(chatId, binding.messageThreadId);
+			const linkSuffix = link.length > 0 ? ` ${link}` : "";
+			return `${index + 1}) [${marker}] topic=${topicLabel} session=${binding.activeSession} (${binding.sessionCount})${linkSuffix}`;
+		});
+
+		return `当前 Topic: ${this.formatTopicLabel(currentThreadId)}\n\nTopic 会话列表:\n${rows.join("\n")}\n\n${this.renderSupergroupSessionHelp()}`;
+	}
+
+	private formatTopicLabel(messageThreadId: number | null): string {
+		return messageThreadId === null ? "General" : `${messageThreadId}`;
+	}
+
+	private renderSupergroupSessionHelp(): string {
+		return [
+			"超级群会话命令:",
+			"/session - 查看当前 Topic 会话",
+			"/session list - 列出本群所有 Topic 会话",
+			"/session new - 新建 Topic + 新会话",
+			"/session use - 已禁用（请直接切 Topic）",
+			"/session delete - 删除当前 Topic 与会话",
 		].join("\n");
 	}
 

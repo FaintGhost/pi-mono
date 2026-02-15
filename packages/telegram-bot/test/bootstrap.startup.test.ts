@@ -42,7 +42,8 @@ describe("Scenario 0: 基础运行骨架可启动", () => {
 		await app.start();
 
 		expect(transport.commandsCalls).toHaveLength(1);
-		expect(transport.commandsCalls[0].map((command) => command.command)).toEqual(["reset", "session"]);
+		expect(transport.commandsCalls[0].scope).toEqual({ type: "all_private_chats" });
+		expect(transport.commandsCalls[0].commands.map((command) => command.command)).toEqual(["reset", "session"]);
 		expect(transport.startCalls).toBe(1);
 	});
 });

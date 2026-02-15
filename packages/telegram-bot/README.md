@@ -1,17 +1,19 @@
 # @mariozechner/pi-telegram-bot
 
-Telegram 私聊机器人，基于 `pi --mode rpc`，复用本机 pi 的认证与模型默认解析。
+Telegram 机器人（私聊 + 超级群 Topic），基于 `pi --mode rpc`，复用本机 pi 的认证与模型默认解析。
 
 ## 特性（v0）
 
--  仅处理私聊消息（`chat.type=private`）
+-  同时支持私聊与超级群 Topic
 -  白名单控制（非白名单静默忽略）
--  每个 chat 常驻一个 pi RPC runtime
+-  超级群采用 `1 Topic = 1 Session`
+-  每个会话上下文常驻一个 pi RPC runtime
 -  原生输入中状态（`sendChatAction: typing`）
 -  流式回复（通过 Telegram 消息编辑）
 -  `/reset` 软重置（会话轮转，旧会话文件保留）
--  `/session` 会话管理（查看、列出、创建、切换）
--  启动时自动注册 Telegram 命令（根据实现能力自动更新）
+-  `/session` 会话管理（查看、列出、创建、切换、删除）
+-  超级群主聊天区（无 Topic）静默忽略
+-  启动时注册私聊命令；超级群对白名单成员懒注册命令
 -  空闲 TTL 回收 runtime（不删除会话文件）
 -  控制台结构化日志（启动、消息、错误、reset）
 
@@ -55,14 +57,15 @@ cp .env.example .env
 
 ## 命令注册
 
-Bot 启动时会根据当前实现能力自动调用 Telegram `setMyCommands`（scope 为私聊）注册命令列表。
+-  启动时会注册私聊命令（scope=`all_private_chats`）
+-  超级群中，白名单成员首次发言时，按成员维度懒注册命令（scope=`chat_member`）
 
-当前会注册：
+当前命令：
 
--  `/reset` - 重置当前会话
--  `/session` - 会话管理（查看、列出、创建、切换、删除）
+-  `/reset`
+-  `/session`
 
-`/session` 子命令：
+### 私聊 `/session` 子命令
 
 -  `/session` 或 `/session current`：查看当前会话
 -  `/session list`：列出当前 chat 的所有会话
@@ -70,10 +73,20 @@ Bot 启动时会根据当前实现能力自动调用 Telegram `setMyCommands`（
 -  `/session use <编号|文件名>`：切换到指定历史会话
 -  `/session delete <编号|文件名>`：删除指定会话（若删除当前会话，会自动切换到可用会话）
 
+### 超级群 Topic `/session` 子命令
+
+-  `/session`：查看当前 Topic 会话
+-  `/session list`：列出本群所有 Topic 会话
+-  `/session new`：创建新 Topic + 新会话（返回可点击深链）
+-  `/session use`：禁用（请直接切换 Topic）
+-  `/session delete`：删除当前 Topic 与其会话（删 Topic 失败会回滚，不删除会话）
+
 ## 会话目录
 
-默认会话目录：`./data/telegram-bot/sessions/<chat_id>/`
+默认会话目录：`./data/telegram-bot/sessions/<context_id>/`
 
+-  私聊 context：`<chat_id>`
+-  超级群 Topic context：`supergroup-<chat_id>-topic-<message_thread_id>`
 -  `active-session.txt`：当前活跃会话指针
 -  `session-*.jsonl`：历史会话文件（永久保留）
 

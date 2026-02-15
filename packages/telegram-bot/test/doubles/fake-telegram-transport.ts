@@ -1,9 +1,17 @@
-import type { TelegramBotCommand, TelegramInboundMessage, TelegramTransport } from "../../src/telegram.js";
+import type {
+	TelegramBotCommand,
+	TelegramCommandScope,
+	TelegramCreatedForumTopic,
+	TelegramInboundMessage,
+	TelegramThreadTarget,
+	TelegramTransport,
+} from "../../src/telegram.js";
 
 export interface SentMessage {
 	chatId: string;
 	text: string;
 	messageId: number;
+	target?: TelegramThreadTarget;
 }
 
 export interface EditedMessage {
@@ -12,14 +20,29 @@ export interface EditedMessage {
 	text: string;
 }
 
+export interface CreatedTopic {
+	chatId: string;
+	name: string;
+	messageThreadId: number;
+}
+
+export interface DeletedTopic {
+	chatId: string;
+	messageThreadId: number;
+}
+
 export class FakeTelegramTransport implements TelegramTransport {
 	public startCalls = 0;
 	public stopCalls = 0;
-	public readonly commandsCalls: TelegramBotCommand[][] = [];
-	public readonly typingCalls: string[] = [];
+	public readonly commandsCalls: Array<{ commands: TelegramBotCommand[]; scope: TelegramCommandScope }> = [];
+	public readonly typingCalls: Array<{ chatId: string; target?: TelegramThreadTarget }> = [];
 	public readonly sentMessages: SentMessage[] = [];
 	public readonly editedMessages: EditedMessage[] = [];
+	public readonly createdTopics: CreatedTopic[] = [];
+	public readonly deletedTopics: DeletedTopic[] = [];
+	public failDeleteTopic = false;
 	private nextMessageId = 1;
+	private nextThreadId = 1_000;
 	private handler: ((message: TelegramInboundMessage) => Promise<void>) | null = null;
 
 	async start(onMessage: (message: TelegramInboundMessage) => Promise<void>): Promise<void> {
@@ -31,22 +54,44 @@ export class FakeTelegramTransport implements TelegramTransport {
 		this.stopCalls += 1;
 	}
 
-	async setCommands(commands: TelegramBotCommand[]): Promise<void> {
-		this.commandsCalls.push(commands);
+	async setCommands(
+		commands: TelegramBotCommand[],
+		scope: TelegramCommandScope = { type: "all_private_chats" },
+	): Promise<void> {
+		this.commandsCalls.push({
+			commands,
+			scope,
+		});
 	}
 
-	async setTyping(chatId: string): Promise<void> {
-		this.typingCalls.push(chatId);
+	async setTyping(chatId: string, target?: TelegramThreadTarget): Promise<void> {
+		this.typingCalls.push({ chatId, target });
 	}
 
-	async sendMessage(chatId: string, text: string): Promise<number> {
+	async sendMessage(chatId: string, text: string, target?: TelegramThreadTarget): Promise<number> {
 		const messageId = this.nextMessageId++;
-		this.sentMessages.push({ chatId, text, messageId });
+		this.sentMessages.push({ chatId, text, messageId, target });
 		return messageId;
 	}
 
 	async editMessage(chatId: string, messageId: number, text: string): Promise<void> {
 		this.editedMessages.push({ chatId, messageId, text });
+	}
+
+	async createForumTopic(chatId: string, name: string): Promise<TelegramCreatedForumTopic> {
+		const messageThreadId = this.nextThreadId++;
+		this.createdTopics.push({ chatId, name, messageThreadId });
+		return {
+			messageThreadId,
+			name,
+		};
+	}
+
+	async deleteForumTopic(chatId: string, messageThreadId: number): Promise<void> {
+		if (this.failDeleteTopic) {
+			throw new Error("delete topic failed");
+		}
+		this.deletedTopics.push({ chatId, messageThreadId });
 	}
 
 	async emitMessage(message: TelegramInboundMessage): Promise<void> {

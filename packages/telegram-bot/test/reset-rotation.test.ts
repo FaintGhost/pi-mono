@@ -85,6 +85,7 @@ describe("Scenario 5: /reset 执行会话轮转（软重置）", () => {
 		await app.handleMessage({
 			chatId: "chat-1",
 			chatType: "private",
+			messageThreadId: null,
 			userId: 1001,
 			text: "/reset@my_bot",
 			messageId: 1,

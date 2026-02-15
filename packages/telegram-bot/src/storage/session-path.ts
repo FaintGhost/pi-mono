@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, unlink, writeFile } from "fs/promises";
+import { mkdir, readdir, readFile, rm, unlink, writeFile } from "fs/promises";
 import { basename, join, resolve } from "path";
 
 const ACTIVE_POINTER_FILE = "active-session.txt";
@@ -31,29 +31,29 @@ export class SessionPathManager {
 		this.sessionsDir = resolve(sessionsDir);
 	}
 
-	async getActiveSessionPath(chatId: string): Promise<string> {
-		const chatDir = await this.ensureChatDir(chatId);
-		const pointerPath = this.getPointerPath(chatDir);
+	async getActiveSessionPath(contextId: string): Promise<string> {
+		const contextDir = await this.ensureContextDir(contextId);
+		const pointerPath = this.getPointerPath(contextDir);
 
 		try {
 			const fileName = (await readFile(pointerPath, "utf8")).trim();
 			if (fileName.length > 0) {
-				return join(chatDir, fileName);
+				return join(contextDir, fileName);
 			}
 		} catch {
 			// ignore missing pointer file
 		}
 
-		const nextPath = await this.createSessionFile(chatDir);
+		const nextPath = await this.createSessionFile(contextDir);
 		await this.writePointer(pointerPath, nextPath);
 		return nextPath;
 	}
 
-	async getSessionState(chatId: string): Promise<SessionState> {
-		const chatDir = await this.ensureChatDir(chatId);
-		const activePath = await this.getActiveSessionPath(chatId);
+	async getSessionState(contextId: string): Promise<SessionState> {
+		const contextDir = await this.ensureContextDir(contextId);
+		const activePath = await this.getActiveSessionPath(contextId);
 		const activeFileName = basename(activePath);
-		const sessionFileNames = await this.listSessionFileNames(chatDir);
+		const sessionFileNames = await this.listSessionFileNames(contextDir);
 
 		if (!sessionFileNames.includes(activeFileName)) {
 			sessionFileNames.push(activeFileName);
@@ -67,11 +67,11 @@ export class SessionPathManager {
 		};
 	}
 
-	async rotateSession(chatId: string): Promise<SessionRotationResult> {
-		const chatDir = await this.ensureChatDir(chatId);
-		const pointerPath = this.getPointerPath(chatDir);
-		const previousPath = await this.getActiveSessionPath(chatId);
-		const nextPath = await this.createSessionFile(chatDir);
+	async rotateSession(contextId: string): Promise<SessionRotationResult> {
+		const contextDir = await this.ensureContextDir(contextId);
+		const pointerPath = this.getPointerPath(contextDir);
+		const previousPath = await this.getActiveSessionPath(contextId);
+		const nextPath = await this.createSessionFile(contextDir);
 		await this.writePointer(pointerPath, nextPath);
 
 		return {
@@ -80,17 +80,17 @@ export class SessionPathManager {
 		};
 	}
 
-	async switchSession(chatId: string, sessionFileName: string): Promise<SessionRotationResult> {
+	async switchSession(contextId: string, sessionFileName: string): Promise<SessionRotationResult> {
 		const safeSessionFileName = this.validateSessionFileName(sessionFileName);
-		const chatDir = await this.ensureChatDir(chatId);
-		const pointerPath = this.getPointerPath(chatDir);
-		const state = await this.getSessionState(chatId);
+		const contextDir = await this.ensureContextDir(contextId);
+		const pointerPath = this.getPointerPath(contextDir);
+		const state = await this.getSessionState(contextId);
 
 		if (!state.sessionFileNames.includes(safeSessionFileName)) {
 			throw new Error(`Session not found: ${safeSessionFileName}`);
 		}
 
-		const nextPath = join(chatDir, safeSessionFileName);
+		const nextPath = join(contextDir, safeSessionFileName);
 		await this.writePointer(pointerPath, nextPath);
 		return {
 			previousPath: state.activePath,
@@ -98,17 +98,17 @@ export class SessionPathManager {
 		};
 	}
 
-	async deleteSession(chatId: string, sessionFileName: string): Promise<SessionDeleteResult> {
+	async deleteSession(contextId: string, sessionFileName: string): Promise<SessionDeleteResult> {
 		const safeSessionFileName = this.validateSessionFileName(sessionFileName);
-		const chatDir = await this.ensureChatDir(chatId);
-		const pointerPath = this.getPointerPath(chatDir);
-		const state = await this.getSessionState(chatId);
+		const contextDir = await this.ensureContextDir(contextId);
+		const pointerPath = this.getPointerPath(contextDir);
+		const state = await this.getSessionState(contextId);
 
 		if (!state.sessionFileNames.includes(safeSessionFileName)) {
 			throw new Error(`Session not found: ${safeSessionFileName}`);
 		}
 
-		const deletedPath = join(chatDir, safeSessionFileName);
+		const deletedPath = join(contextDir, safeSessionFileName);
 		await unlink(deletedPath);
 
 		const remainingSessionFileNames = state.sessionFileNames.filter((session) => session !== safeSessionFileName);
@@ -117,10 +117,10 @@ export class SessionPathManager {
 
 		if (wasActive) {
 			if (remainingSessionFileNames.length === 0) {
-				nextActivePath = await this.createSessionFile(chatDir);
+				nextActivePath = await this.createSessionFile(contextDir);
 				remainingSessionFileNames.push(basename(nextActivePath));
 			} else {
-				nextActivePath = join(chatDir, remainingSessionFileNames[0]);
+				nextActivePath = join(contextDir, remainingSessionFileNames[0]);
 			}
 			await this.writePointer(pointerPath, nextActivePath);
 		}
@@ -136,25 +136,49 @@ export class SessionPathManager {
 		};
 	}
 
-	private async ensureChatDir(chatId: string): Promise<string> {
-		const safeChatId = chatId.trim();
-		if (safeChatId.length === 0) {
-			throw new Error("chatId cannot be empty");
+	async deleteContext(contextId: string): Promise<void> {
+		const safeContextId = this.validateContextId(contextId);
+		const contextDir = join(this.sessionsDir, safeContextId);
+		await rm(contextDir, { recursive: true, force: true });
+	}
+
+	async listContextIds(): Promise<string[]> {
+		await mkdir(this.sessionsDir, { recursive: true });
+		const entries = await readdir(this.sessionsDir, { withFileTypes: true });
+		return entries
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name)
+			.sort((left, right) => left.localeCompare(right));
+	}
+
+	private async ensureContextDir(contextId: string): Promise<string> {
+		const safeContextId = this.validateContextId(contextId);
+		const contextDir = join(this.sessionsDir, safeContextId);
+		await mkdir(contextDir, { recursive: true });
+		return contextDir;
+	}
+
+	private validateContextId(contextId: string): string {
+		const safeContextId = contextId.trim();
+		if (safeContextId.length === 0) {
+			throw new Error("contextId cannot be empty");
 		}
 
-		const chatDir = join(this.sessionsDir, safeChatId);
-		await mkdir(chatDir, { recursive: true });
-		return chatDir;
+		if (basename(safeContextId) !== safeContextId) {
+			throw new Error(`Invalid contextId: ${contextId}`);
+		}
+
+		return safeContextId;
 	}
 
-	private getPointerPath(chatDir: string): string {
-		return join(chatDir, ACTIVE_POINTER_FILE);
+	private getPointerPath(contextDir: string): string {
+		return join(contextDir, ACTIVE_POINTER_FILE);
 	}
 
-	private async createSessionFile(chatDir: string): Promise<string> {
+	private async createSessionFile(contextDir: string): Promise<string> {
 		const timestamp = new Date().toISOString().replaceAll(":", "-");
 		const sessionFileName = `session-${timestamp}-${Math.random().toString(16).slice(2, 8)}.jsonl`;
-		const sessionPath = join(chatDir, sessionFileName);
+		const sessionPath = join(contextDir, sessionFileName);
 		await writeFile(sessionPath, "", { flag: "a" });
 		return sessionPath;
 	}
@@ -180,8 +204,8 @@ export class SessionPathManager {
 		return sessionFileName;
 	}
 
-	private async listSessionFileNames(chatDir: string): Promise<string[]> {
-		const entries = await readdir(chatDir, { withFileTypes: true });
+	private async listSessionFileNames(contextDir: string): Promise<string[]> {
+		const entries = await readdir(contextDir, { withFileTypes: true });
 		return entries
 			.filter((entry) => entry.isFile() && this.isSessionFileName(entry.name))
 			.map((entry) => entry.name)
