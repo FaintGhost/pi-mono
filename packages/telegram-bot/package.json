@@ -1,0 +1,43 @@
+{
+  "name": "@mariozechner/pi-telegram-bot",
+  "version": "0.52.12",
+  "description": "Telegram bot that delegates private chats to pi RPC",
+  "type": "module",
+  "bin": {
+    "pi-telegram-bot": "dist/main.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsgo -p tsconfig.build.json && chmod +x dist/main.js",
+    "dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+    "test": "vitest --run",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "ai",
+    "agent"
+  ],
+  "author": "Mario Zechner",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/badlogic/pi-mono.git",
+    "directory": "packages/telegram-bot"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.4"
+  }
+}
