@@ -11,8 +11,9 @@ import { buildSupergroupTopicContextKey } from "./storage/context-key.js";
 import type { PromptDetailsRecord, PromptDetailsStore } from "./storage/details-store.js";
 
 const TELEGRAM_MESSAGE_LIMIT = 3_500;
-const DEFAULT_CONCISE_REPLY_LIMIT = 1_200;
 const MAX_TELEGRAM_RETRY_ATTEMPTS = 20;
+const PROMPT_PROGRESS_LOG_INTERVAL_MS = 15_000;
+const PROMPT_STALL_WARN_THRESHOLD_MS = 45_000;
 
 export interface TelegramInboundMessage {
 	chatId: string;
@@ -477,14 +478,81 @@ export class TelegramBotApp {
 			return;
 		}
 
+		const promptStartedAt = Date.now();
+		let firstTextDeltaAt: number | null = null;
+		let lastTextDeltaAt: number | null = null;
+		let streamedChars = 0;
 		const stopTyping = this.startTypingLoop(message.chatId, threadTarget);
+		const stopPromptProgress = this.startPromptProgressLogger({
+			chatId: message.chatId,
+			contextId,
+			userId: message.userId,
+			startedAt: promptStartedAt,
+			getFirstTextDeltaAt: () => firstTextDeltaAt,
+			getLastTextDeltaAt: () => lastTextDeltaAt,
+			getStreamedChars: () => streamedChars,
+		});
+
+		logInfo("prompt started", {
+			chatId: message.chatId,
+			contextId,
+			userId: message.userId,
+			messageId: message.messageId,
+			messageThreadId: message.messageThreadId ?? "none",
+		});
 
 		try {
-			const result = await this.pool.runPrompt(contextId, text);
+			const result = await this.pool.runPrompt(contextId, text, {
+				onTextUpdate: (updatedText) => {
+					streamedChars = updatedText.length;
+					const now = Date.now();
+					lastTextDeltaAt = now;
+					if (firstTextDeltaAt === null) {
+						firstTextDeltaAt = now;
+						logInfo("prompt first text delta", {
+							chatId: message.chatId,
+							contextId,
+							userId: message.userId,
+							latencyMs: now - promptStartedAt,
+						});
+					}
+				},
+			});
+			stopPromptProgress();
+
+			const promptCompletedAt = Date.now();
+			logInfo("prompt completed", {
+				chatId: message.chatId,
+				contextId,
+				userId: message.userId,
+				durationMs: promptCompletedAt - promptStartedAt,
+				firstDeltaLatencyMs: firstTextDeltaAt === null ? "none" : firstTextDeltaAt - promptStartedAt,
+				lastDeltaAgeMs: lastTextDeltaAt === null ? "none" : promptCompletedAt - lastTextDeltaAt,
+				streamedChars,
+				resultChars: result.text.length,
+				toolCalls: (result.toolCalls ?? []).length,
+			});
+
 			await this.persistPromptDetails(contextId, text, result);
 
-			const conciseReply = this.buildConciseReply(result.text);
-			await this.sendFinalResponseWithRateLimitNotice(message.chatId, conciseReply, threadTarget);
+			const deliveryStartedAt = Date.now();
+			const finalResponseText = this.buildFinalResponseText(result.text);
+			logInfo("response delivery started", {
+				chatId: message.chatId,
+				contextId,
+				userId: message.userId,
+				responseChars: finalResponseText.length,
+				longResponseRedirected: result.text.length > TELEGRAM_MESSAGE_LIMIT,
+			});
+
+			await this.sendFinalResponseWithRateLimitNotice(message.chatId, finalResponseText, threadTarget);
+
+			logInfo("response delivery completed", {
+				chatId: message.chatId,
+				contextId,
+				userId: message.userId,
+				durationMs: Date.now() - deliveryStartedAt,
+			});
 
 			logInfo("message handled", {
 				contextId,
@@ -493,17 +561,23 @@ export class TelegramBotApp {
 				toolCalls: (result.toolCalls ?? []).length,
 			});
 		} catch (error) {
+			stopPromptProgress();
 			const messageText = error instanceof Error ? error.message : String(error);
 			logError("message handling failed", {
+				chatId: message.chatId,
 				contextId,
 				userId: message.userId,
 				error: messageText,
+				elapsedMs: Date.now() - promptStartedAt,
+				firstDeltaLatencyMs: firstTextDeltaAt === null ? "none" : firstTextDeltaAt - promptStartedAt,
+				streamedChars,
 			});
 
 			try {
 				await this.sendText(message.chatId, `请求失败: ${messageText}`, threadTarget);
 			} catch (notifyError) {
 				logError("failed to notify user about error", {
+					chatId: message.chatId,
 					contextId,
 					error: notifyError instanceof Error ? notifyError.message : String(notifyError),
 				});
@@ -511,6 +585,71 @@ export class TelegramBotApp {
 		} finally {
 			stopTyping();
 		}
+	}
+
+	private startPromptProgressLogger(options: {
+		chatId: string;
+		contextId: string;
+		userId: number;
+		startedAt: number;
+		getFirstTextDeltaAt: () => number | null;
+		getLastTextDeltaAt: () => number | null;
+		getStreamedChars: () => number;
+	}): () => void {
+		let active = true;
+		const timer = setInterval(() => {
+			if (!active) {
+				return;
+			}
+
+			const now = Date.now();
+			const elapsedMs = now - options.startedAt;
+			const firstTextDeltaAt = options.getFirstTextDeltaAt();
+			const lastTextDeltaAt = options.getLastTextDeltaAt();
+			const streamedChars = options.getStreamedChars();
+			const sinceLastDeltaMs = lastTextDeltaAt === null ? null : now - lastTextDeltaAt;
+
+			if (firstTextDeltaAt === null && elapsedMs >= PROMPT_STALL_WARN_THRESHOLD_MS) {
+				logWarn("prompt waiting for first text delta", {
+					chatId: options.chatId,
+					contextId: options.contextId,
+					userId: options.userId,
+					elapsedMs,
+				});
+				return;
+			}
+
+			if (sinceLastDeltaMs !== null && sinceLastDeltaMs >= PROMPT_STALL_WARN_THRESHOLD_MS) {
+				logWarn("prompt text stream appears stalled", {
+					chatId: options.chatId,
+					contextId: options.contextId,
+					userId: options.userId,
+					elapsedMs,
+					sinceLastDeltaMs,
+					streamedChars,
+				});
+				return;
+			}
+
+			logInfo("prompt progress", {
+				chatId: options.chatId,
+				contextId: options.contextId,
+				userId: options.userId,
+				elapsedMs,
+				streamedChars,
+				firstDeltaSeen: firstTextDeltaAt === null ? "no" : "yes",
+				sinceLastDeltaMs: sinceLastDeltaMs ?? "none",
+			});
+		}, PROMPT_PROGRESS_LOG_INTERVAL_MS);
+		timer.unref();
+
+		return () => {
+			if (!active) {
+				return;
+			}
+			active = false;
+			clearInterval(timer);
+		};
 	}
 
 	private isSupportedChatType(chatType: string): boolean {
@@ -999,15 +1138,16 @@ export class TelegramBotApp {
 		return `${normalized.slice(0, maxLength)}...`;
 	}
 
-	private buildConciseReply(text: string): string {
+	private buildFinalResponseText(text: string): string {
 		const normalized = this.normalizeText(text);
-		if (normalized.length <= DEFAULT_CONCISE_REPLY_LIMIT) {
+		if (normalized.length <= TELEGRAM_MESSAGE_LIMIT) {
 			return normalized;
 		}
 
-		const concise = normalized.slice(0, DEFAULT_CONCISE_REPLY_LIMIT);
-		const omitted = normalized.length - DEFAULT_CONCISE_REPLY_LIMIT;
-		return `${concise}\n\n（为便于手机阅读，已省略 ${omitted} 字。发送 /details 查看完整回答与关键工具摘要。）`;
+		return [
+			"回答较长，为保证 Markdown 渲染稳定，主消息不做截断发送。",
+			"请发送 /details 查看完整回答与关键工具摘要。",
+		].join("\n");
 	}
 
 	private async persistPromptDetails(contextId: string, prompt: string, result: PromptResult): Promise<void> {

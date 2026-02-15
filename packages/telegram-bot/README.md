@@ -10,6 +10,7 @@ Telegram 机器人（私聊 + 超级群 Topic），基于 `pi --mode rpc`，复�
 -  每个会话上下文常驻一个 pi RPC runtime
 -  原生输入中状态（`sendChatAction: typing`）
 -  默认非流式：仅 typing，完成后一次性回复
+-  长回答渲染优先：主消息不截断 Markdown，提示使用 `/details` 查看完整内容
 -  `/reset` 软重置（会话轮转，旧会话文件保留）
 -  `/session` 会话管理（查看、列出、创建、切换、删除）
 -  `/details` 查看最近一次“完整回答 + 关键工具摘要”
