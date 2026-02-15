@@ -482,6 +482,9 @@ export class TelegramBotApp {
 		let firstTextDeltaAt: number | null = null;
 		let lastTextDeltaAt: number | null = null;
 		let streamedChars = 0;
+		let rpcEventCount = 0;
+		let lastRpcEventAt: number | null = null;
+		let lastRpcEventType: string | null = null;
 		const stopTyping = this.startTypingLoop(message.chatId, threadTarget);
 		const stopPromptProgress = this.startPromptProgressLogger({
 			chatId: message.chatId,
@@ -491,6 +494,9 @@ export class TelegramBotApp {
 			getFirstTextDeltaAt: () => firstTextDeltaAt,
 			getLastTextDeltaAt: () => lastTextDeltaAt,
 			getStreamedChars: () => streamedChars,
+			getRpcEventCount: () => rpcEventCount,
+			getLastRpcEventAt: () => lastRpcEventAt,
+			getLastRpcEventType: () => lastRpcEventType,
 		});
 
 		logInfo("prompt started", {
@@ -517,6 +523,18 @@ export class TelegramBotApp {
 						});
 					}
 				},
+				onRpcEvent: (event) => {
+					rpcEventCount += 1;
+					lastRpcEventAt = Date.now();
+					lastRpcEventType = this.describeRpcEventType(event);
+					this.logPromptRpcEvent({
+						chatId: message.chatId,
+						contextId,
+						userId: message.userId,
+						elapsedMs: Date.now() - promptStartedAt,
+						event,
+					});
+				},
 			});
 			stopPromptProgress();
 
@@ -529,6 +547,8 @@ export class TelegramBotApp {
 				firstDeltaLatencyMs: firstTextDeltaAt === null ? "none" : firstTextDeltaAt - promptStartedAt,
 				lastDeltaAgeMs: lastTextDeltaAt === null ? "none" : promptCompletedAt - lastTextDeltaAt,
 				streamedChars,
+				rpcEventCount,
+				lastRpcEventType: lastRpcEventType ?? "none",
 				resultChars: result.text.length,
 				toolCalls: (result.toolCalls ?? []).length,
 			});
@@ -571,6 +591,8 @@ export class TelegramBotApp {
 				elapsedMs: Date.now() - promptStartedAt,
 				firstDeltaLatencyMs: firstTextDeltaAt === null ? "none" : firstTextDeltaAt - promptStartedAt,
 				streamedChars,
+				rpcEventCount,
+				lastRpcEventType: lastRpcEventType ?? "none",
 			});
 
 			try {
@@ -595,6 +617,9 @@ export class TelegramBotApp {
 		getFirstTextDeltaAt: () => number | null;
 		getLastTextDeltaAt: () => number | null;
 		getStreamedChars: () => number;
+		getRpcEventCount: () => number;
+		getLastRpcEventAt: () => number | null;
+		getLastRpcEventType: () => string | null;
 	}): () => void {
 		let active = true;
 		const timer = setInterval(() => {
@@ -607,7 +632,11 @@ export class TelegramBotApp {
 			const firstTextDeltaAt = options.getFirstTextDeltaAt();
 			const lastTextDeltaAt = options.getLastTextDeltaAt();
 			const streamedChars = options.getStreamedChars();
+			const rpcEventCount = options.getRpcEventCount();
+			const lastRpcEventAt = options.getLastRpcEventAt();
+			const lastRpcEventType = options.getLastRpcEventType();
 			const sinceLastDeltaMs = lastTextDeltaAt === null ? null : now - lastTextDeltaAt;
+			const sinceLastRpcEventMs = lastRpcEventAt === null ? null : now - lastRpcEventAt;
 
 			if (firstTextDeltaAt === null && elapsedMs >= PROMPT_STALL_WARN_THRESHOLD_MS) {
 				logWarn("prompt waiting for first text delta", {
@@ -615,6 +644,9 @@ export class TelegramBotApp {
 					contextId: options.contextId,
 					userId: options.userId,
 					elapsedMs,
+					rpcEventCount,
+					lastRpcEventType: lastRpcEventType ?? "none",
+					sinceLastRpcEventMs: sinceLastRpcEventMs ?? "none",
 				});
 				return;
 			}
@@ -627,6 +659,9 @@ export class TelegramBotApp {
 					elapsedMs,
 					sinceLastDeltaMs,
 					streamedChars,
+					rpcEventCount,
+					lastRpcEventType: lastRpcEventType ?? "none",
+					sinceLastRpcEventMs: sinceLastRpcEventMs ?? "none",
 				});
 				return;
 			}
@@ -637,8 +672,11 @@ export class TelegramBotApp {
 				userId: options.userId,
 				elapsedMs,
 				streamedChars,
+				rpcEventCount,
 				firstDeltaSeen: firstTextDeltaAt === null ? "no" : "yes",
 				sinceLastDeltaMs: sinceLastDeltaMs ?? "none",
+				lastRpcEventType: lastRpcEventType ?? "none",
+				sinceLastRpcEventMs: sinceLastRpcEventMs ?? "none",
 			});
 		}, PROMPT_PROGRESS_LOG_INTERVAL_MS);
 		timer.unref();
@@ -650,6 +688,146 @@ export class TelegramBotApp {
 			active = false;
 			clearInterval(timer);
 		};
+	}
+
+	private describeRpcEventType(event: { type: string; [key: string]: unknown }): string {
+		if (event.type !== "message_update") {
+			return event.type;
+		}
+
+		const assistantMessageEvent = event.assistantMessageEvent;
+		if (!assistantMessageEvent || typeof assistantMessageEvent !== "object") {
+			return "message_update";
+		}
+
+		const maybeType = (assistantMessageEvent as { type?: unknown }).type;
+		if (typeof maybeType !== "string") {
+			return "message_update";
+		}
+
+		return `message_update:${maybeType}`;
+	}
+
+	private logPromptRpcEvent(options: {
+		chatId: string;
+		contextId: string;
+		userId: number;
+		elapsedMs: number;
+		event: { type: string; [key: string]: unknown };
+	}): void {
+		const baseMeta = {
+			chatId: options.chatId,
+			contextId: options.contextId,
+			userId: options.userId,
+			elapsedMs: options.elapsedMs,
+		};
+
+		switch (options.event.type) {
+			case "agent_start":
+			case "turn_start":
+			case "turn_end":
+			case "message_start":
+			case "message_end":
+			case "agent_end":
+				logInfo("prompt rpc event", {
+					...baseMeta,
+					eventType: options.event.type,
+				});
+				return;
+			case "tool_execution_start": {
+				const toolName = typeof options.event.toolName === "string" ? options.event.toolName : "unknown";
+				const toolCallId = typeof options.event.toolCallId === "string" ? options.event.toolCallId : "unknown";
+				const args =
+					options.event.args && typeof options.event.args === "object" && !Array.isArray(options.event.args)
+						? (options.event.args as Record<string, unknown>)
+						: null;
+				logInfo("prompt tool start", {
+					...baseMeta,
+					toolName,
+					toolCallId,
+					args: this.renderToolArgs(args),
+				});
+				return;
+			}
+			case "tool_execution_end": {
+				const toolName = typeof options.event.toolName === "string" ? options.event.toolName : "unknown";
+				const toolCallId = typeof options.event.toolCallId === "string" ? options.event.toolCallId : "unknown";
+				const isError = options.event.isError === true;
+				logInfo("prompt tool end", {
+					...baseMeta,
+					toolName,
+					toolCallId,
+					isError,
+				});
+				return;
+			}
+			case "auto_retry_start": {
+				const attempt = typeof options.event.attempt === "number" ? options.event.attempt : "unknown";
+				const delayMs = typeof options.event.delayMs === "number" ? options.event.delayMs : "unknown";
+				logWarn("prompt auto retry start", {
+					...baseMeta,
+					attempt,
+					delayMs,
+					errorMessage:
+						typeof options.event.errorMessage === "string"
+							? this.truncateSingleLine(options.event.errorMessage, 120)
+							: "unknown",
+				});
+				return;
+			}
+			case "auto_retry_end":
+				logInfo("prompt auto retry end", {
+					...baseMeta,
+					success: options.event.success === true,
+					attempt: typeof options.event.attempt === "number" ? options.event.attempt : "unknown",
+					finalError:
+						typeof options.event.finalError === "string"
+							? this.truncateSingleLine(options.event.finalError, 120)
+							: undefined,
+				});
+				return;
+			case "auto_compaction_start":
+				logWarn("prompt auto compaction start", {
+					...baseMeta,
+					reason: typeof options.event.reason === "string" ? options.event.reason : "unknown",
+				});
+				return;
+			case "auto_compaction_end":
+				logInfo("prompt auto compaction end", {
+					...baseMeta,
+					aborted: options.event.aborted === true,
+					willRetry: options.event.willRetry === true,
+					errorMessage:
+						typeof options.event.errorMessage === "string"
+							? this.truncateSingleLine(options.event.errorMessage, 120)
+							: undefined,
+				});
+				return;
+			case "extension_error":
+				logWarn("prompt extension error", {
+					...baseMeta,
+					extensionPath: typeof options.event.extensionPath === "string" ? options.event.extensionPath : "unknown",
+					error: typeof options.event.error === "string" ? options.event.error : "unknown",
+				});
+				return;
+			case "message_update": {
+				const eventType = this.describeRpcEventType(options.event);
+				if (
+					eventType === "message_update:text_delta" ||
+					eventType === "message_update:thinking_delta" ||
+					eventType === "message_update:toolcall_delta"
+				) {
+					return;
+				}
+				logInfo("prompt rpc event", {
+					...baseMeta,
+					eventType,
+				});
+				return;
+			}
+			default:
+				return;
+		}
 	}
 
 	private isSupportedChatType(chatType: string): boolean {

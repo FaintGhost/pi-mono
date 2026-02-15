@@ -2,6 +2,7 @@ import { RpcClient, type RpcEvent, type RpcResponse, type SpawnFunction } from "
 
 export interface PromptOptions {
 	onTextUpdate?: (text: string) => Promise<void> | void;
+	onRpcEvent?: (event: RpcEvent) => Promise<void> | void;
 }
 
 export interface ToolCallSummary {
@@ -69,6 +70,8 @@ export class PiProcessRuntime implements AgentRuntime {
 
 			const unsubscribe = this.rpcClient.subscribe((event) => {
 				try {
+					void options.onRpcEvent?.(event);
+
 					if (event.type === "message_update") {
 						const maybeAssistantEvent = event.assistantMessageEvent;
 						if (
