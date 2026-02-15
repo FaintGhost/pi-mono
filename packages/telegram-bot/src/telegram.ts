@@ -6,8 +6,13 @@ import type {
 	SessionSwitchResult,
 	SupergroupTopicBinding,
 } from "./runtime/agent-pool.js";
-import type { PromptOptions, PromptResult } from "./runtime/agent-runtime.js";
+import type { PromptOptions, PromptResult, ToolCallSummary } from "./runtime/agent-runtime.js";
 import { buildSupergroupTopicContextKey } from "./storage/context-key.js";
+import type { PromptDetailsRecord, PromptDetailsStore } from "./storage/details-store.js";
+
+const TELEGRAM_MESSAGE_LIMIT = 3_500;
+const DEFAULT_CONCISE_REPLY_LIMIT = 1_200;
+const MAX_TELEGRAM_RETRY_ATTEMPTS = 20;
 
 export interface TelegramInboundMessage {
 	chatId: string;
@@ -59,6 +64,10 @@ interface TelegramApiResponse<T> {
 	ok: boolean;
 	result: T;
 	description?: string;
+	error_code?: number;
+	parameters?: {
+		retry_after?: number;
+	};
 }
 
 interface TelegramUpdate {
@@ -88,6 +97,18 @@ interface TelegramSendMessageResult {
 interface TelegramForumTopicResult {
 	message_thread_id: number;
 	name: string;
+}
+
+class TelegramApiError extends Error {
+	readonly errorCode: number | null;
+	readonly retryAfterSeconds: number | null;
+
+	constructor(message: string, options?: { errorCode?: number | null; retryAfterSeconds?: number | null }) {
+		super(message);
+		this.name = "TelegramApiError";
+		this.errorCode = options?.errorCode ?? null;
+		this.retryAfterSeconds = options?.retryAfterSeconds ?? null;
+	}
 }
 
 export interface PromptRuntimePool {
@@ -319,14 +340,19 @@ export class TelegramLongPollingTransport implements TelegramTransport {
 			json = (await response.json()) as TelegramApiResponse<T>;
 		} catch {
 			if (!response.ok) {
-				throw new Error(`Telegram API HTTP error: ${response.status}`);
+				throw new TelegramApiError(`Telegram API HTTP error: ${response.status}`, {
+					errorCode: response.status,
+				});
 			}
-			throw new Error("Telegram API returned invalid JSON response");
+			throw new TelegramApiError("Telegram API returned invalid JSON response");
 		}
 
 		if (!response.ok || !json.ok) {
 			const description = json.description || `HTTP ${response.status}`;
-			throw new Error(`Telegram API error: ${description}`);
+			throw new TelegramApiError(`Telegram API error: ${description}`, {
+				errorCode: typeof json.error_code === "number" ? json.error_code : response.status,
+				retryAfterSeconds: typeof json.parameters?.retry_after === "number" ? json.parameters.retry_after : null,
+			});
 		}
 
 		return json.result;
@@ -337,6 +363,8 @@ export class TelegramBotApp {
 	private readonly config: TelegramBotConfig;
 	private readonly transport: TelegramTransport;
 	private readonly pool: PromptRuntimePool;
+	private readonly detailsStore: PromptDetailsStore;
+	private readonly sleepFn: (ms: number) => Promise<void>;
 	private readonly commands: TelegramBotCommand[] = [
 		{
 			command: "reset",
@@ -346,13 +374,29 @@ export class TelegramBotApp {
 			command: "session",
 			description: "查看与切换会话",
 		},
+		{
+			command: "details",
+			description: "查看最近一次详细回答",
+		},
 	];
 	private readonly supergroupCommandScopes = new Set<string>();
 
-	constructor(options: { config: TelegramBotConfig; transport: TelegramTransport; pool: PromptRuntimePool }) {
+	constructor(options: {
+		config: TelegramBotConfig;
+		transport: TelegramTransport;
+		pool: PromptRuntimePool;
+		detailsStore?: PromptDetailsStore;
+		sleepFn?: (ms: number) => Promise<void>;
+	}) {
 		this.config = options.config;
 		this.transport = options.transport;
 		this.pool = options.pool;
+		this.detailsStore = options.detailsStore ?? {
+			saveLatest: async () => {},
+			getLatest: async () => null,
+			clear: async () => {},
+		};
+		this.sleepFn = options.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 	}
 
 	async start(): Promise<void> {
@@ -405,13 +449,15 @@ export class TelegramBotApp {
 
 		const command = this.parseCommand(text);
 		const contextId = this.getContextId(message);
+		const threadTarget = this.toThreadTarget(message);
 
 		if (command?.name === "reset") {
 			await this.pool.reset(contextId);
-			await this.transport.sendMessage(
+			await this.clearPromptDetails(contextId);
+			await this.sendText(
 				message.chatId,
 				this.isSupergroup(message.chatType) ? "当前 topic 会话已重置" : "会话已重置",
-				this.toThreadTarget(message),
+				threadTarget,
 			);
 			logInfo("session reset", { contextId, userId: message.userId });
 			return;
@@ -426,58 +472,25 @@ export class TelegramBotApp {
 			return;
 		}
 
-		let responseMessageId: number | null = null;
-		let latestText = "";
-		let lastEditAt = 0;
-		let renderChain = Promise.resolve();
-		const threadTarget = this.toThreadTarget(message);
-
-		const renderText = async (textToRender: string): Promise<void> => {
-			const normalized = this.normalizeText(textToRender);
-			if (responseMessageId === null) {
-				responseMessageId = await this.transport.sendMessage(message.chatId, normalized, threadTarget);
-				return;
-			}
-			await this.transport.editMessage(message.chatId, responseMessageId, normalized);
-		};
-
-		const enqueueRender = (textToRender: string): void => {
-			renderChain = renderChain
-				.catch((error) => {
-					logWarn("render queue recovered", {
-						chatId: message.chatId,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				})
-				.then(async () => {
-					await renderText(textToRender);
-				});
-		};
+		if (command?.name === "details") {
+			await this.handleDetailsCommand(message, contextId);
+			return;
+		}
 
 		const stopTyping = this.startTypingLoop(message.chatId, threadTarget);
 
 		try {
-			const result = await this.pool.runPrompt(contextId, text, {
-				onTextUpdate: async (updatedText) => {
-					latestText = updatedText;
-					const now = Date.now();
-					if (now - lastEditAt < this.config.streamEditThrottleMs) {
-						return;
-					}
+			const result = await this.pool.runPrompt(contextId, text);
+			await this.persistPromptDetails(contextId, text, result);
 
-					lastEditAt = now;
-					enqueueRender(latestText);
-				},
-			});
-
-			latestText = result.text;
-			enqueueRender(latestText);
-			await renderChain;
+			const conciseReply = this.buildConciseReply(result.text);
+			await this.sendFinalResponseWithRateLimitNotice(message.chatId, conciseReply, threadTarget);
 
 			logInfo("message handled", {
 				contextId,
 				userId: message.userId,
-				responseLength: latestText.length,
+				responseLength: result.text.length,
+				toolCalls: (result.toolCalls ?? []).length,
 			});
 		} catch (error) {
 			const messageText = error instanceof Error ? error.message : String(error);
@@ -487,19 +500,8 @@ export class TelegramBotApp {
 				error: messageText,
 			});
 
-			await renderChain.catch((renderError) => {
-				logWarn("render queue failed during error handling", {
-					contextId,
-					error: renderError instanceof Error ? renderError.message : String(renderError),
-				});
-			});
-
 			try {
-				if (responseMessageId === null) {
-					await this.transport.sendMessage(message.chatId, `请求失败: ${messageText}`, threadTarget);
-				} else {
-					await this.transport.editMessage(message.chatId, responseMessageId, `请求失败: ${messageText}`);
-				}
+				await this.sendText(message.chatId, `请求失败: ${messageText}`, threadTarget);
 			} catch (notifyError) {
 				logError("failed to notify user about error", {
 					contextId,
@@ -622,77 +624,80 @@ export class TelegramBotApp {
 
 		if (action === "status" || action === "current") {
 			const overview = await this.pool.getSessionOverview(contextId);
-			await this.transport.sendMessage(chatId, this.renderSessionStatus(overview));
+			await this.sendText(chatId, this.renderSessionStatus(overview));
 			return;
 		}
 
 		if (action === "list") {
 			const overview = await this.pool.getSessionOverview(contextId);
-			await this.transport.sendMessage(chatId, this.renderSessionList(overview));
+			await this.sendText(chatId, this.renderSessionList(overview));
 			return;
 		}
 
 		if (action === "new") {
 			const created = await this.pool.createSession(contextId);
-			await this.transport.sendMessage(chatId, `已切换到新会话: ${created.nextSession}`);
+			await this.clearPromptDetails(contextId);
+			await this.sendText(chatId, `已切换到新会话: ${created.nextSession}`);
 			return;
 		}
 
 		if (action === "use") {
 			const selector = args[1]?.trim();
 			if (!selector) {
-				await this.transport.sendMessage(chatId, "用法: /session use <编号|会话文件名>");
+				await this.sendText(chatId, "用法: /session use <编号|会话文件名>");
 				return;
 			}
 
 			const overview = await this.pool.getSessionOverview(contextId);
 			const sessionFileName = this.resolveSessionSelector(selector, overview.sessions);
 			if (!sessionFileName) {
-				await this.transport.sendMessage(chatId, `未找到会话: ${selector}`);
+				await this.sendText(chatId, `未找到会话: ${selector}`);
 				return;
 			}
 
 			const switched = await this.pool.switchSession(contextId, sessionFileName);
 			if (switched.previousSession === switched.nextSession) {
-				await this.transport.sendMessage(chatId, `当前已在会话: ${switched.nextSession}`);
+				await this.sendText(chatId, `当前已在会话: ${switched.nextSession}`);
 				return;
 			}
 
-			await this.transport.sendMessage(chatId, `会话已切换: ${switched.previousSession} -> ${switched.nextSession}`);
+			await this.clearPromptDetails(contextId);
+			await this.sendText(chatId, `会话已切换: ${switched.previousSession} -> ${switched.nextSession}`);
 			return;
 		}
 
 		if (action === "delete" || action === "rm") {
 			const selector = args[1]?.trim();
 			if (!selector) {
-				await this.transport.sendMessage(chatId, "用法: /session delete <编号|会话文件名>");
+				await this.sendText(chatId, "用法: /session delete <编号|会话文件名>");
 				return;
 			}
 
 			const overview = await this.pool.getSessionOverview(contextId);
 			const sessionFileName = this.resolveSessionSelector(selector, overview.sessions);
 			if (!sessionFileName) {
-				await this.transport.sendMessage(chatId, `未找到会话: ${selector}`);
+				await this.sendText(chatId, `未找到会话: ${selector}`);
 				return;
 			}
 
 			const deleted = await this.pool.deleteSession(contextId, sessionFileName);
 			if (deleted.wasActive) {
-				await this.transport.sendMessage(
+				await this.clearPromptDetails(contextId);
+				await this.sendText(
 					chatId,
 					`已删除当前会话: ${deleted.deletedSession}\n已切换到: ${deleted.activeSession}\n剩余会话数: ${deleted.remainingSessions.length}`,
 				);
 				return;
 			}
 
-			await this.transport.sendMessage(
+			await this.sendText(
 				chatId,
 				`已删除会话: ${deleted.deletedSession}\n当前会话: ${deleted.activeSession}\n剩余会话数: ${deleted.remainingSessions.length}`,
 			);
 			return;
 		}
 
-		await this.transport.sendMessage(chatId, this.renderSessionHelp());
+		await this.sendText(chatId, this.renderSessionHelp());
 	}
 
 	private async handleSupergroupSessionCommand(
@@ -707,26 +712,18 @@ export class TelegramBotApp {
 
 		if (action === "status" || action === "current") {
 			const overview = await this.pool.getSessionOverview(contextId);
-			await this.transport.sendMessage(
-				chatId,
-				this.renderSupergroupSessionStatus(currentThreadId, overview),
-				threadTarget,
-			);
+			await this.sendText(chatId, this.renderSupergroupSessionStatus(currentThreadId, overview), threadTarget);
 			return;
 		}
 
 		if (action === "list") {
 			if (!this.pool.listSupergroupTopicBindings) {
-				await this.transport.sendMessage(chatId, "当前运行时不支持超级群会话列表", threadTarget);
+				await this.sendText(chatId, "当前运行时不支持超级群会话列表", threadTarget);
 				return;
 			}
 
 			const bindings = await this.pool.listSupergroupTopicBindings(chatId);
-			await this.transport.sendMessage(
-				chatId,
-				this.renderSupergroupSessionList(chatId, currentThreadId, bindings),
-				threadTarget,
-			);
+			await this.sendText(chatId, this.renderSupergroupSessionList(chatId, currentThreadId, bindings), threadTarget);
 			return;
 		}
 
@@ -737,7 +734,7 @@ export class TelegramBotApp {
 			const createdOverview = await this.pool.getSessionOverview(createdContextId);
 			const deepLink = this.buildTopicDeepLink(chatId, createdTopic.messageThreadId);
 
-			await this.transport.sendMessage(
+			await this.sendText(
 				chatId,
 				`已创建新 Topic: ${createdTopic.name}\nSession: ${createdOverview.activeSession}\n打开: ${deepLink}`,
 				threadTarget,
@@ -746,22 +743,18 @@ export class TelegramBotApp {
 		}
 
 		if (action === "use") {
-			await this.transport.sendMessage(
-				chatId,
-				"超级群模式下 /session use 已禁用，请直接切换到目标 Topic。",
-				threadTarget,
-			);
+			await this.sendText(chatId, "超级群模式下 /session use 已禁用，请直接切换到目标 Topic。", threadTarget);
 			return;
 		}
 
 		if (action === "delete" || action === "rm") {
 			if (args.length > 1) {
-				await this.transport.sendMessage(chatId, "超级群仅支持删除当前 Topic：/session delete", threadTarget);
+				await this.sendText(chatId, "超级群仅支持删除当前 Topic：/session delete", threadTarget);
 				return;
 			}
 
 			if (currentThreadId === null) {
-				await this.transport.sendMessage(chatId, "General Topic 不支持删除，请切换到其他 Topic。", threadTarget);
+				await this.sendText(chatId, "General Topic 不支持删除，请切换到其他 Topic。", threadTarget);
 				return;
 			}
 
@@ -771,7 +764,7 @@ export class TelegramBotApp {
 				await this.transport.deleteForumTopic(chatId, currentThreadId);
 			} catch (error) {
 				const errorText = error instanceof Error ? error.message : String(error);
-				await this.transport.sendMessage(chatId, `删除 Topic 失败，操作已回滚：${errorText}`, threadTarget);
+				await this.sendText(chatId, `删除 Topic 失败，操作已回滚：${errorText}`, threadTarget);
 				return;
 			}
 
@@ -780,6 +773,7 @@ export class TelegramBotApp {
 					await this.pool.deleteContext(contextId);
 				} else {
 					await this.pool.deleteSession(contextId, activeOverview.activeSession);
+					await this.clearPromptDetails(contextId);
 				}
 			} catch (error) {
 				logError("session cleanup failed after topic deletion", {
@@ -788,11 +782,25 @@ export class TelegramBotApp {
 				});
 			}
 
-			await this.transport.sendMessage(chatId, `当前 Topic 已删除，原会话: ${activeOverview.activeSession}`);
+			await this.sendText(chatId, `当前 Topic 已删除，原会话: ${activeOverview.activeSession}`);
 			return;
 		}
 
-		await this.transport.sendMessage(chatId, this.renderSupergroupSessionHelp(), threadTarget);
+		await this.sendText(chatId, this.renderSupergroupSessionHelp(), threadTarget);
+	}
+
+	private async handleDetailsCommand(message: TelegramInboundMessage, contextId: string): Promise<void> {
+		const details = await this.detailsStore.getLatest(contextId);
+		const threadTarget = this.toThreadTarget(message);
+		if (!details) {
+			const emptyMessage = this.isSupergroup(message.chatType)
+				? "当前 Topic 暂无可用详情。"
+				: "当前会话暂无可用详情。";
+			await this.sendText(message.chatId, emptyMessage, threadTarget);
+			return;
+		}
+
+		await this.sendText(message.chatId, this.renderDetails(details), threadTarget);
 	}
 
 	private parseCommand(text: string): { name: string; args: string[] } | null {
@@ -866,6 +874,7 @@ export class TelegramBotApp {
 			"/session new - 新建并切换会话",
 			"/session use <编号|文件名> - 切换会话",
 			"/session delete <编号|文件名> - 删除会话",
+			"/details - 查看最近一次详细回答",
 		].join("\n");
 	}
 
@@ -906,11 +915,310 @@ export class TelegramBotApp {
 			"/session new - 新建 Topic + 新会话",
 			"/session use - 已禁用（请直接切 Topic）",
 			"/session delete - 删除当前 Topic 与会话",
+			"/details - 查看当前 Topic 最近一次详细回答",
 		].join("\n");
+	}
+
+	private renderDetails(details: PromptDetailsRecord): string {
+		const promptPreview = details.prompt.trim().length > 0 ? details.prompt.trim() : "(空输入)";
+		const toolSummary = this.renderToolSummary(details.toolCalls);
+		const fullText = this.normalizeText(details.fullText);
+
+		return [
+			"最近一次回答详情",
+			`时间: ${details.updatedAt}`,
+			`提问: ${promptPreview}`,
+			"",
+			"关键工具调用摘要:",
+			toolSummary,
+			"",
+			"详细回答:",
+			fullText,
+		].join("\n");
+	}
+
+	private renderToolSummary(toolCalls: ToolCallSummary[]): string {
+		if (toolCalls.length === 0) {
+			return "- 本次回答未调用工具";
+		}
+
+		const lines = toolCalls.slice(0, 10).map((call, index) => {
+			const argsText = this.renderToolArgs(call.args);
+			return `${index + 1}) ${call.toolName}${argsText.length > 0 ? ` ${argsText}` : ""}`;
+		});
+
+		if (toolCalls.length > 10) {
+			lines.push(`... 其余 ${toolCalls.length - 10} 条已省略`);
+		}
+
+		return lines.join("\n");
+	}
+
+	private renderToolArgs(args: Record<string, unknown> | null): string {
+		if (!args) {
+			return "";
+		}
+
+		const entries = Object.entries(args);
+		if (entries.length === 0) {
+			return "";
+		}
+
+		const parts = entries.slice(0, 3).map(([key, value]) => `${key}=${this.formatToolArgValue(value)}`);
+		if (entries.length > 3) {
+			parts.push("...");
+		}
+		return parts.join(" ");
+	}
+
+	private formatToolArgValue(value: unknown): string {
+		if (typeof value === "string") {
+			return this.truncateSingleLine(value, 80);
+		}
+
+		if (typeof value === "number" || typeof value === "boolean") {
+			return String(value);
+		}
+
+		if (value === null || value === undefined) {
+			return String(value);
+		}
+
+		try {
+			return this.truncateSingleLine(JSON.stringify(value), 80);
+		} catch {
+			return "[unserializable]";
+		}
+	}
+
+	private truncateSingleLine(value: string, maxLength: number): string {
+		const normalized = value.replaceAll(/\s+/g, " ").trim();
+		if (normalized.length <= maxLength) {
+			return normalized;
+		}
+		return `${normalized.slice(0, maxLength)}...`;
+	}
+
+	private buildConciseReply(text: string): string {
+		const normalized = this.normalizeText(text);
+		if (normalized.length <= DEFAULT_CONCISE_REPLY_LIMIT) {
+			return normalized;
+		}
+
+		const concise = normalized.slice(0, DEFAULT_CONCISE_REPLY_LIMIT);
+		const omitted = normalized.length - DEFAULT_CONCISE_REPLY_LIMIT;
+		return `${concise}\n\n（为便于手机阅读，已省略 ${omitted} 字。发送 /details 查看完整回答与关键工具摘要。）`;
+	}
+
+	private async persistPromptDetails(contextId: string, prompt: string, result: PromptResult): Promise<void> {
+		try {
+			await this.detailsStore.saveLatest(contextId, {
+				updatedAt: new Date().toISOString(),
+				prompt,
+				fullText: result.text,
+				toolCalls: result.toolCalls ?? [],
+			});
+		} catch (error) {
+			logWarn("failed to persist prompt details", {
+				contextId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	private async clearPromptDetails(contextId: string): Promise<void> {
+		try {
+			await this.detailsStore.clear(contextId);
+		} catch (error) {
+			logWarn("failed to clear prompt details", {
+				contextId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	private normalizeText(text: string): string {
 		const trimmed = text.trim();
 		return trimmed.length > 0 ? text : "...";
+	}
+
+	private splitText(text: string): string[] {
+		const normalized = this.normalizeText(text);
+		if (normalized.length <= TELEGRAM_MESSAGE_LIMIT) {
+			return [normalized];
+		}
+
+		const chunks: string[] = [];
+		let remaining = normalized;
+
+		while (remaining.length > TELEGRAM_MESSAGE_LIMIT) {
+			let splitIndex = remaining.lastIndexOf("\n", TELEGRAM_MESSAGE_LIMIT);
+			if (splitIndex <= 0 || splitIndex < TELEGRAM_MESSAGE_LIMIT / 2) {
+				splitIndex = TELEGRAM_MESSAGE_LIMIT;
+			}
+
+			chunks.push(remaining.slice(0, splitIndex).trimEnd());
+			remaining = remaining.slice(splitIndex).trimStart();
+		}
+
+		if (remaining.length > 0) {
+			chunks.push(remaining);
+		}
+
+		return chunks.length > 0 ? chunks : ["..."];
+	}
+
+	private async sendText(chatId: string, text: string, target?: TelegramThreadTarget): Promise<void> {
+		const chunks = this.splitText(text);
+		for (const chunk of chunks) {
+			await this.retryTelegramAction({
+				chatId,
+				operation: "sendMessage",
+				action: async () => {
+					await this.transport.sendMessage(chatId, chunk, target);
+				},
+			});
+		}
+	}
+
+	private async sendFinalResponseWithRateLimitNotice(
+		chatId: string,
+		text: string,
+		target?: TelegramThreadTarget,
+	): Promise<void> {
+		const chunks = this.splitText(text);
+		if (chunks.length !== 1) {
+			await this.sendText(chatId, text, target);
+			return;
+		}
+
+		const finalText = chunks[0];
+		let statusMessageId: number | null = null;
+
+		await this.retryTelegramAction({
+			chatId,
+			operation: "final response",
+			action: async () => {
+				if (statusMessageId === null) {
+					await this.transport.sendMessage(chatId, finalText, target);
+					return;
+				}
+
+				await this.transport.editMessage(chatId, statusMessageId, finalText);
+			},
+			onRateLimit: async (retryAfterSeconds) => {
+				if (statusMessageId === null) {
+					statusMessageId = await this.trySendRateLimitStatus(chatId, retryAfterSeconds, target);
+					return;
+				}
+
+				await this.tryUpdateRateLimitStatus(chatId, statusMessageId, retryAfterSeconds);
+			},
+		});
+	}
+
+	private async trySendRateLimitStatus(
+		chatId: string,
+		retryAfterSeconds: number,
+		target?: TelegramThreadTarget,
+	): Promise<number | null> {
+		const text = `消息发送受限，正在重试（约 ${retryAfterSeconds} 秒）...`;
+		try {
+			return await this.transport.sendMessage(chatId, text, target);
+		} catch (error) {
+			logWarn("failed to send rate limit status", {
+				chatId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return null;
+		}
+	}
+
+	private async tryUpdateRateLimitStatus(
+		chatId: string,
+		statusMessageId: number,
+		retryAfterSeconds: number,
+	): Promise<void> {
+		const text = `消息发送受限，继续重试（约 ${retryAfterSeconds} 秒）...`;
+		try {
+			await this.transport.editMessage(chatId, statusMessageId, text);
+		} catch (error) {
+			if (this.isRateLimitError(error)) {
+				return;
+			}
+			logWarn("failed to update rate limit status", {
+				chatId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	private async retryTelegramAction<T>(options: {
+		chatId: string;
+		operation: string;
+		action: () => Promise<T>;
+		onRateLimit?: (retryAfterSeconds: number, attempt: number) => Promise<void>;
+	}): Promise<T> {
+		for (let attempt = 1; attempt <= MAX_TELEGRAM_RETRY_ATTEMPTS; attempt += 1) {
+			try {
+				return await options.action();
+			} catch (error) {
+				const retryAfterSeconds = this.extractRetryAfterSeconds(error);
+				if (retryAfterSeconds === null || attempt >= MAX_TELEGRAM_RETRY_ATTEMPTS) {
+					throw error;
+				}
+
+				logWarn("telegram request throttled, waiting to retry", {
+					chatId: options.chatId,
+					operation: options.operation,
+					attempt,
+					retryAfterSeconds,
+				});
+
+				if (options.onRateLimit) {
+					try {
+						await options.onRateLimit(retryAfterSeconds, attempt);
+					} catch (notifyError) {
+						logWarn("rate limit callback failed", {
+							chatId: options.chatId,
+							operation: options.operation,
+							error: notifyError instanceof Error ? notifyError.message : String(notifyError),
+						});
+					}
+				}
+
+				await this.sleepFn(Math.max(1, retryAfterSeconds) * 1_000);
+			}
+		}
+
+		throw new Error(`Retry budget exhausted for ${options.operation}`);
+	}
+
+	private extractRetryAfterSeconds(error: unknown): number | null {
+		if (error instanceof TelegramApiError && typeof error.retryAfterSeconds === "number") {
+			if (Number.isFinite(error.retryAfterSeconds) && error.retryAfterSeconds > 0) {
+				return error.retryAfterSeconds;
+			}
+		}
+
+		if (!(error instanceof Error)) {
+			return null;
+		}
+
+		const match = error.message.match(/retry after\s+(\d+)/i);
+		if (!match) {
+			return null;
+		}
+
+		const seconds = Number.parseInt(match[1], 10);
+		if (!Number.isFinite(seconds) || seconds <= 0) {
+			return null;
+		}
+
+		return seconds;
+	}
+
+	private isRateLimitError(error: unknown): boolean {
+		return this.extractRetryAfterSeconds(error) !== null;
 	}
 }

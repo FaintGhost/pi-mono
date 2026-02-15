@@ -13,6 +13,7 @@ export {
 	type PiProcessRuntimeOptions,
 	type PromptOptions,
 	type PromptResult,
+	type ToolCallSummary,
 } from "./runtime/agent-runtime.js";
 export { SerialQueue } from "./runtime/queue.js";
 export {
@@ -26,6 +27,11 @@ export {
 	buildSupergroupTopicContextKey,
 	parseSupergroupTopicContextKey,
 } from "./storage/context-key.js";
+export {
+	FilePromptDetailsStore,
+	type PromptDetailsRecord,
+	type PromptDetailsStore,
+} from "./storage/details-store.js";
 export {
 	type SessionDeleteResult as SessionStorageDeleteResult,
 	SessionPathManager,

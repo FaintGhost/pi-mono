@@ -15,19 +15,11 @@ const config: TelegramBotConfig = {
 	parseMode: "Markdown",
 };
 
-describe("Scenario 1: 白名单私聊可对话且流式更新", () => {
-	it("白名单私聊消息会触发流式编辑", async () => {
+describe("Scenario 1: 白名单私聊可对话", () => {
+	it("白名单私聊消息完成后一次性发送最终回答", async () => {
 		const transport = new FakeTelegramTransport();
 		const pool = {
-			runPrompt: async (
-				_chatId: string,
-				_message: string,
-				options?: { onTextUpdate?: (text: string) => Promise<void> | void },
-			) => {
-				await options?.onTextUpdate?.("你");
-				await options?.onTextUpdate?.("你好");
-				return { text: "你好" };
-			},
+			runPrompt: async () => ({ text: "你好", toolCalls: [] }),
 			reset: async () => {},
 			getSessionOverview: async () => ({ activeSession: "session-1.jsonl", sessions: ["session-1.jsonl"] }),
 			createSession: async () => ({ previousSession: "session-1.jsonl", nextSession: "session-2.jsonl" }),
@@ -58,8 +50,7 @@ describe("Scenario 1: 白名单私聊可对话且流式更新", () => {
 
 		expect(transport.typingCalls.length).toBeGreaterThan(0);
 		expect(transport.sentMessages).toHaveLength(1);
-		expect(transport.sentMessages[0].text).toBe("你");
-		expect(transport.editedMessages.length).toBeGreaterThanOrEqual(1);
-		expect(transport.editedMessages.at(-1)?.text).toBe("你好");
+		expect(transport.sentMessages[0].text).toBe("你好");
+		expect(transport.editedMessages).toHaveLength(0);
 	});
 });

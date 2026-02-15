@@ -9,9 +9,11 @@ Telegram 机器人（私聊 + 超级群 Topic），基于 `pi --mode rpc`，复�
 -  超级群采用 `1 Topic = 1 Session`
 -  每个会话上下文常驻一个 pi RPC runtime
 -  原生输入中状态（`sendChatAction: typing`）
--  流式回复（通过 Telegram 消息编辑）
+-  默认非流式：仅 typing，完成后一次性回复
 -  `/reset` 软重置（会话轮转，旧会话文件保留）
 -  `/session` 会话管理（查看、列出、创建、切换、删除）
+-  `/details` 查看最近一次“完整回答 + 关键工具摘要”
+-  429 限流自动重试（提示“受限重试中”，成功后更新最终答案）
 -  超级群主聊天区（无 Topic）静默忽略
 -  启动时注册私聊命令；超级群对白名单成员懒注册命令
 -  空闲 TTL 回收 runtime（不删除会话文件）
@@ -30,7 +32,7 @@ Telegram 机器人（私聊 + 超级群 Topic），基于 `pi --mode rpc`，复�
 -  `PI_CWD`（可选，默认当前目录）
 -  `TELEGRAM_DATA_DIR`（可选，默认 `./data/telegram-bot`）
 -  `TELEGRAM_IDLE_TTL_MS`（可选，默认 `1200000`）
--  `TELEGRAM_STREAM_EDIT_THROTTLE_MS`（可选，默认 `600`）
+-  `TELEGRAM_STREAM_EDIT_THROTTLE_MS`（可选，默认 `600`，当前默认非流式回复可忽略）
 -  `TELEGRAM_PARSE_MODE`（可选，默认 `Markdown`，可选：`none` / `Markdown` / `MarkdownV2` / `HTML`）
 -  `TELEGRAM_ENV_FILE`（可选，默认 `.env`，相对当前工作目录）
 
@@ -64,6 +66,7 @@ cp .env.example .env
 
 -  `/reset`
 -  `/session`
+-  `/details`
 
 ### 私聊 `/session` 子命令
 
@@ -72,6 +75,7 @@ cp .env.example .env
 -  `/session new`：创建并切换到新会话
 -  `/session use <编号|文件名>`：切换到指定历史会话
 -  `/session delete <编号|文件名>`：删除指定会话（若删除当前会话，会自动切换到可用会话）
+-  `/details`：查看最近一次完整回答与关键工具调用摘要
 
 ### 超级群 Topic `/session` 子命令
 
@@ -80,6 +84,7 @@ cp .env.example .env
 -  `/session new`：创建新 Topic + 新会话（返回可点击深链）
 -  `/session use`：禁用（请直接切换 Topic）
 -  `/session delete`：删除当前 Topic 与其会话（删 Topic 失败会回滚，不删除会话）
+-  `/details`：仅查看当前 Topic 最近一次完整回答与关键工具摘要
 
 ## 会话目录
 
@@ -89,6 +94,7 @@ cp .env.example .env
 -  超级群 Topic context：`supergroup-<chat_id>-topic-<message_thread_id>`
 -  `active-session.txt`：当前活跃会话指针
 -  `session-*.jsonl`：历史会话文件（永久保留）
+-  `latest-response.json`：最近一次回答详情（供 `/details` 使用，重启后仍可读取）
 
 ## 启动
 

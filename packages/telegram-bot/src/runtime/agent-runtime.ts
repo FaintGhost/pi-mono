@@ -4,8 +4,15 @@ export interface PromptOptions {
 	onTextUpdate?: (text: string) => Promise<void> | void;
 }
 
+export interface ToolCallSummary {
+	toolCallId: string;
+	toolName: string;
+	args: Record<string, unknown> | null;
+}
+
 export interface PromptResult {
 	text: string;
+	toolCalls?: ToolCallSummary[];
 }
 
 export interface AgentRuntime {
@@ -50,6 +57,8 @@ export class PiProcessRuntime implements AgentRuntime {
 		this.assertSuccess(promptResponse, "prompt");
 
 		let streamedText = "";
+		const toolCalls: ToolCallSummary[] = [];
+		const seenToolCallIds = new Set<string>();
 
 		await new Promise<void>((resolve, reject) => {
 			const removeExitListener = this.rpcClient.onExit(() => {
@@ -76,6 +85,23 @@ export class PiProcessRuntime implements AgentRuntime {
 						}
 					}
 
+					if (event.type === "tool_execution_start") {
+						const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : null;
+						const toolName = typeof event.toolName === "string" ? event.toolName : null;
+
+						if (!toolCallId || !toolName || seenToolCallIds.has(toolCallId)) {
+							return;
+						}
+
+						seenToolCallIds.add(toolCallId);
+						const args = this.normalizeToolArgs(event.args);
+						toolCalls.push({
+							toolCallId,
+							toolName,
+							args,
+						});
+					}
+
 					if (event.type === "agent_end") {
 						removeExitListener();
 						unsubscribe();
@@ -97,7 +123,10 @@ export class PiProcessRuntime implements AgentRuntime {
 		const data = (lastAssistantResponse.data || {}) as LastAssistantTextData;
 		const finalText = typeof data.text === "string" ? data.text : streamedText;
 
-		return { text: finalText };
+		return {
+			text: finalText,
+			toolCalls,
+		};
 	}
 
 	isAlive(): boolean {
@@ -114,6 +143,14 @@ export class PiProcessRuntime implements AgentRuntime {
 			const message = response.error || `RPC command '${commandName}' failed`;
 			throw new Error(message);
 		}
+	}
+
+	private normalizeToolArgs(value: unknown): Record<string, unknown> | null {
+		if (!value || typeof value !== "object" || Array.isArray(value)) {
+			return null;
+		}
+
+		return value as Record<string, unknown>;
 	}
 }
 

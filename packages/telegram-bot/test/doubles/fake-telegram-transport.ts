@@ -40,6 +40,8 @@ export class FakeTelegramTransport implements TelegramTransport {
 	public readonly editedMessages: EditedMessage[] = [];
 	public readonly createdTopics: CreatedTopic[] = [];
 	public readonly deletedTopics: DeletedTopic[] = [];
+	public readonly sendErrors: Error[] = [];
+	public readonly editErrors: Error[] = [];
 	public failDeleteTopic = false;
 	private nextMessageId = 1;
 	private nextThreadId = 1_000;
@@ -69,12 +71,22 @@ export class FakeTelegramTransport implements TelegramTransport {
 	}
 
 	async sendMessage(chatId: string, text: string, target?: TelegramThreadTarget): Promise<number> {
+		const error = this.sendErrors.shift();
+		if (error) {
+			throw error;
+		}
+
 		const messageId = this.nextMessageId++;
 		this.sentMessages.push({ chatId, text, messageId, target });
 		return messageId;
 	}
 
 	async editMessage(chatId: string, messageId: number, text: string): Promise<void> {
+		const error = this.editErrors.shift();
+		if (error) {
+			throw error;
+		}
+
 		this.editedMessages.push({ chatId, messageId, text });
 	}
 

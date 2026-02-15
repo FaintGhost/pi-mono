@@ -5,6 +5,7 @@ import { loadConfig } from "./config.js";
 import { logError, logInfo } from "./log.js";
 import { AgentPool } from "./runtime/agent-pool.js";
 import { PiProcessRuntime } from "./runtime/agent-runtime.js";
+import { FilePromptDetailsStore } from "./storage/details-store.js";
 import { SessionPathManager } from "./storage/session-path.js";
 import { TelegramBotApp, TelegramLongPollingTransport } from "./telegram.js";
 
@@ -29,10 +30,12 @@ const pool = new AgentPool({
 });
 
 const transport = new TelegramLongPollingTransport(config.telegramBotToken, config.parseMode);
+const detailsStore = new FilePromptDetailsStore(config.sessionsDir);
 const app = new TelegramBotApp({
 	config,
 	transport,
 	pool,
+	detailsStore,
 });
 
 logInfo("starting", {
