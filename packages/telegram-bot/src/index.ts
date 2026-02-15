@@ -1,5 +1,11 @@
-export { loadConfig, type TelegramBotConfig } from "./config.js";
-export { AgentPool, type RuntimeFactory } from "./runtime/agent-pool.js";
+export { loadConfig, type TelegramBotConfig, type TelegramParseMode } from "./config.js";
+export {
+	AgentPool,
+	type RuntimeFactory,
+	type SessionDeleteResult,
+	type SessionOverview,
+	type SessionSwitchResult,
+} from "./runtime/agent-pool.js";
 export {
 	type AgentRuntime,
 	PiProcessRuntime,
@@ -15,9 +21,15 @@ export {
 	type RpcRequest,
 	type RpcResponse,
 } from "./runtime/rpc-client.js";
-export { SessionPathManager, type SessionRotationResult } from "./storage/session-path.js";
+export {
+	type SessionDeleteResult as SessionStorageDeleteResult,
+	SessionPathManager,
+	type SessionRotationResult,
+	type SessionState,
+} from "./storage/session-path.js";
 export {
 	TelegramBotApp,
+	type TelegramBotCommand,
 	type TelegramInboundMessage,
 	TelegramLongPollingTransport,
 	type TelegramTransport,

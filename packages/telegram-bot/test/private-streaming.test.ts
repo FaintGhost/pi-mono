@@ -29,6 +29,16 @@ describe("Scenario 1: 白名单私聊可对话且流式更新", () => {
 				return { text: "你好" };
 			},
 			reset: async () => {},
+			getSessionOverview: async () => ({ activeSession: "session-1.jsonl", sessions: ["session-1.jsonl"] }),
+			createSession: async () => ({ previousSession: "session-1.jsonl", nextSession: "session-2.jsonl" }),
+			switchSession: async () => ({ previousSession: "session-1.jsonl", nextSession: "session-1.jsonl" }),
+			deleteSession: async () => ({
+				deletedSession: "session-2.jsonl",
+				wasActive: false,
+				previousActiveSession: "session-1.jsonl",
+				activeSession: "session-1.jsonl",
+				remainingSessions: ["session-1.jsonl"],
+			}),
 		} as const;
 
 		const app = new TelegramBotApp({

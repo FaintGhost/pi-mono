@@ -10,6 +10,8 @@ Telegram 私聊机器人，基于 `pi --mode rpc`，复用本机 pi 的认证与
 -  原生输入中状态（`sendChatAction: typing`）
 -  流式回复（通过 Telegram 消息编辑）
 -  `/reset` 软重置（会话轮转，旧会话文件保留）
+-  `/session` 会话管理（查看、列出、创建、切换）
+-  启动时自动注册 Telegram 命令（根据实现能力自动更新）
 -  空闲 TTL 回收 runtime（不删除会话文件）
 -  控制台结构化日志（启动、消息、错误、reset）
 
@@ -50,6 +52,23 @@ cp .env.example .env
 ```
 
 优先级：**系统环境变量 > .env 文件**。
+
+## 命令注册
+
+Bot 启动时会根据当前实现能力自动调用 Telegram `setMyCommands`（scope 为私聊）注册命令列表。
+
+当前会注册：
+
+-  `/reset` - 重置当前会话
+-  `/session` - 会话管理（查看、列出、创建、切换、删除）
+
+`/session` 子命令：
+
+-  `/session` 或 `/session current`：查看当前会话
+-  `/session list`：列出当前 chat 的所有会话
+-  `/session new`：创建并切换到新会话
+-  `/session use <编号|文件名>`：切换到指定历史会话
+-  `/session delete <编号|文件名>`：删除指定会话（若删除当前会话，会自动切换到可用会话）
 
 ## 会话目录
 

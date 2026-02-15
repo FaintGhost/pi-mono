@@ -1,11 +1,27 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, readdir, readFile, unlink, writeFile } from "fs/promises";
 import { basename, join, resolve } from "path";
 
 const ACTIVE_POINTER_FILE = "active-session.txt";
+const SESSION_FILE_PREFIX = "session-";
+const SESSION_FILE_SUFFIX = ".jsonl";
 
 export interface SessionRotationResult {
 	previousPath: string;
 	nextPath: string;
+}
+
+export interface SessionDeleteResult {
+	deletedPath: string;
+	wasActive: boolean;
+	previousActivePath: string;
+	nextActivePath: string;
+	remainingSessionFileNames: string[];
+}
+
+export interface SessionState {
+	activePath: string;
+	activeFileName: string;
+	sessionFileNames: string[];
 }
 
 export class SessionPathManager {
@@ -33,6 +49,24 @@ export class SessionPathManager {
 		return nextPath;
 	}
 
+	async getSessionState(chatId: string): Promise<SessionState> {
+		const chatDir = await this.ensureChatDir(chatId);
+		const activePath = await this.getActiveSessionPath(chatId);
+		const activeFileName = basename(activePath);
+		const sessionFileNames = await this.listSessionFileNames(chatDir);
+
+		if (!sessionFileNames.includes(activeFileName)) {
+			sessionFileNames.push(activeFileName);
+			sessionFileNames.sort((left, right) => right.localeCompare(left));
+		}
+
+		return {
+			activePath,
+			activeFileName,
+			sessionFileNames,
+		};
+	}
+
 	async rotateSession(chatId: string): Promise<SessionRotationResult> {
 		const chatDir = await this.ensureChatDir(chatId);
 		const pointerPath = this.getPointerPath(chatDir);
@@ -43,6 +77,62 @@ export class SessionPathManager {
 		return {
 			previousPath,
 			nextPath,
+		};
+	}
+
+	async switchSession(chatId: string, sessionFileName: string): Promise<SessionRotationResult> {
+		const safeSessionFileName = this.validateSessionFileName(sessionFileName);
+		const chatDir = await this.ensureChatDir(chatId);
+		const pointerPath = this.getPointerPath(chatDir);
+		const state = await this.getSessionState(chatId);
+
+		if (!state.sessionFileNames.includes(safeSessionFileName)) {
+			throw new Error(`Session not found: ${safeSessionFileName}`);
+		}
+
+		const nextPath = join(chatDir, safeSessionFileName);
+		await this.writePointer(pointerPath, nextPath);
+		return {
+			previousPath: state.activePath,
+			nextPath,
+		};
+	}
+
+	async deleteSession(chatId: string, sessionFileName: string): Promise<SessionDeleteResult> {
+		const safeSessionFileName = this.validateSessionFileName(sessionFileName);
+		const chatDir = await this.ensureChatDir(chatId);
+		const pointerPath = this.getPointerPath(chatDir);
+		const state = await this.getSessionState(chatId);
+
+		if (!state.sessionFileNames.includes(safeSessionFileName)) {
+			throw new Error(`Session not found: ${safeSessionFileName}`);
+		}
+
+		const deletedPath = join(chatDir, safeSessionFileName);
+		await unlink(deletedPath);
+
+		const remainingSessionFileNames = state.sessionFileNames.filter((session) => session !== safeSessionFileName);
+		const wasActive = state.activeFileName === safeSessionFileName;
+		let nextActivePath = state.activePath;
+
+		if (wasActive) {
+			if (remainingSessionFileNames.length === 0) {
+				nextActivePath = await this.createSessionFile(chatDir);
+				remainingSessionFileNames.push(basename(nextActivePath));
+			} else {
+				nextActivePath = join(chatDir, remainingSessionFileNames[0]);
+			}
+			await this.writePointer(pointerPath, nextActivePath);
+		}
+
+		remainingSessionFileNames.sort((left, right) => right.localeCompare(left));
+
+		return {
+			deletedPath,
+			wasActive,
+			previousActivePath: state.activePath,
+			nextActivePath,
+			remainingSessionFileNames,
 		};
 	}
 
@@ -71,5 +161,34 @@ export class SessionPathManager {
 
 	private async writePointer(pointerPath: string, sessionPath: string): Promise<void> {
 		await writeFile(pointerPath, `${basename(sessionPath)}\n`, "utf8");
+	}
+
+	private validateSessionFileName(value: string): string {
+		const sessionFileName = value.trim();
+		if (sessionFileName.length === 0) {
+			throw new Error("Session file name cannot be empty");
+		}
+
+		if (basename(sessionFileName) !== sessionFileName) {
+			throw new Error(`Invalid session file name: ${value}`);
+		}
+
+		if (!this.isSessionFileName(sessionFileName)) {
+			throw new Error(`Invalid session file name: ${value}`);
+		}
+
+		return sessionFileName;
+	}
+
+	private async listSessionFileNames(chatDir: string): Promise<string[]> {
+		const entries = await readdir(chatDir, { withFileTypes: true });
+		return entries
+			.filter((entry) => entry.isFile() && this.isSessionFileName(entry.name))
+			.map((entry) => entry.name)
+			.sort((left, right) => right.localeCompare(left));
+	}
+
+	private isSessionFileName(fileName: string): boolean {
+		return fileName.startsWith(SESSION_FILE_PREFIX) && fileName.endsWith(SESSION_FILE_SUFFIX);
 	}
 }

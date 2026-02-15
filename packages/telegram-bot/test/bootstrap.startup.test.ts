@@ -21,6 +21,16 @@ describe("Scenario 0: 基础运行骨架可启动", () => {
 		const pool = {
 			runPrompt: async () => ({ text: "" }),
 			reset: async () => {},
+			getSessionOverview: async () => ({ activeSession: "session-1.jsonl", sessions: ["session-1.jsonl"] }),
+			createSession: async () => ({ previousSession: "session-1.jsonl", nextSession: "session-2.jsonl" }),
+			switchSession: async () => ({ previousSession: "session-1.jsonl", nextSession: "session-1.jsonl" }),
+			deleteSession: async () => ({
+				deletedSession: "session-2.jsonl",
+				wasActive: false,
+				previousActiveSession: "session-1.jsonl",
+				activeSession: "session-1.jsonl",
+				remainingSessions: ["session-1.jsonl"],
+			}),
 		} as const;
 
 		const app = new TelegramBotApp({
@@ -31,6 +41,8 @@ describe("Scenario 0: 基础运行骨架可启动", () => {
 
 		await app.start();
 
+		expect(transport.commandsCalls).toHaveLength(1);
+		expect(transport.commandsCalls[0].map((command) => command.command)).toEqual(["reset", "session"]);
 		expect(transport.startCalls).toBe(1);
 	});
 });

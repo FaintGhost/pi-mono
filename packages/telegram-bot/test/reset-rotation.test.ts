@@ -69,6 +69,16 @@ describe("Scenario 5: /reset 执行会话轮转（软重置）", () => {
 				reset: async () => {
 					resetCalls += 1;
 				},
+				getSessionOverview: async () => ({ activeSession: "session-1.jsonl", sessions: ["session-1.jsonl"] }),
+				createSession: async () => ({ previousSession: "session-1.jsonl", nextSession: "session-2.jsonl" }),
+				switchSession: async () => ({ previousSession: "session-1.jsonl", nextSession: "session-1.jsonl" }),
+				deleteSession: async () => ({
+					deletedSession: "session-2.jsonl",
+					wasActive: false,
+					previousActiveSession: "session-1.jsonl",
+					activeSession: "session-1.jsonl",
+					remainingSessions: ["session-1.jsonl"],
+				}),
 			},
 		});
 
@@ -76,7 +86,7 @@ describe("Scenario 5: /reset 执行会话轮转（软重置）", () => {
 			chatId: "chat-1",
 			chatType: "private",
 			userId: 1001,
-			text: "/reset",
+			text: "/reset@my_bot",
 			messageId: 1,
 		});
 

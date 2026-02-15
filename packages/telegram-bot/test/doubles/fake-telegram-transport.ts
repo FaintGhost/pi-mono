@@ -1,4 +1,4 @@
-import type { TelegramInboundMessage, TelegramTransport } from "../../src/telegram.js";
+import type { TelegramBotCommand, TelegramInboundMessage, TelegramTransport } from "../../src/telegram.js";
 
 export interface SentMessage {
 	chatId: string;
@@ -15,6 +15,7 @@ export interface EditedMessage {
 export class FakeTelegramTransport implements TelegramTransport {
 	public startCalls = 0;
 	public stopCalls = 0;
+	public readonly commandsCalls: TelegramBotCommand[][] = [];
 	public readonly typingCalls: string[] = [];
 	public readonly sentMessages: SentMessage[] = [];
 	public readonly editedMessages: EditedMessage[] = [];
@@ -28,6 +29,10 @@ export class FakeTelegramTransport implements TelegramTransport {
 
 	async stop(): Promise<void> {
 		this.stopCalls += 1;
+	}
+
+	async setCommands(commands: TelegramBotCommand[]): Promise<void> {
+		this.commandsCalls.push(commands);
 	}
 
 	async setTyping(chatId: string): Promise<void> {

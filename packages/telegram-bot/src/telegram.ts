@@ -1,5 +1,6 @@
 import type { TelegramBotConfig, TelegramParseMode } from "./config.js";
 import { logError, logInfo, logWarn } from "./log.js";
+import type { SessionDeleteResult, SessionOverview, SessionSwitchResult } from "./runtime/agent-pool.js";
 import type { PromptOptions, PromptResult } from "./runtime/agent-runtime.js";
 
 export interface TelegramInboundMessage {
@@ -10,9 +11,15 @@ export interface TelegramInboundMessage {
 	messageId: number;
 }
 
+export interface TelegramBotCommand {
+	command: string;
+	description: string;
+}
+
 export interface TelegramTransport {
 	start(onMessage: (message: TelegramInboundMessage) => Promise<void>): Promise<void>;
 	stop(): Promise<void>;
+	setCommands(commands: TelegramBotCommand[]): Promise<void>;
 	setTyping(chatId: string): Promise<void>;
 	sendMessage(chatId: string, text: string): Promise<number>;
 	editMessage(chatId: string, messageId: number, text: string): Promise<void>;
@@ -48,6 +55,10 @@ interface TelegramSendMessageResult {
 export interface PromptRuntimePool {
 	runPrompt(chatId: string, message: string, options?: PromptOptions): Promise<PromptResult>;
 	reset(chatId: string): Promise<void>;
+	getSessionOverview(chatId: string): Promise<SessionOverview>;
+	createSession(chatId: string): Promise<SessionSwitchResult>;
+	switchSession(chatId: string, sessionFileName: string): Promise<SessionSwitchResult>;
+	deleteSession(chatId: string, sessionFileName: string): Promise<SessionDeleteResult>;
 }
 
 export class TelegramLongPollingTransport implements TelegramTransport {
@@ -106,6 +117,18 @@ export class TelegramLongPollingTransport implements TelegramTransport {
 		this.running = false;
 		this.activeController?.abort();
 		this.activeController = null;
+	}
+
+	async setCommands(commands: TelegramBotCommand[]): Promise<void> {
+		await this.callApi("setMyCommands", {
+			commands: commands.map((command) => ({
+				command: command.command,
+				description: command.description,
+			})),
+			scope: {
+				type: "all_private_chats",
+			},
+		});
 	}
 
 	async setTyping(chatId: string): Promise<void> {
@@ -229,6 +252,16 @@ export class TelegramBotApp {
 	private readonly config: TelegramBotConfig;
 	private readonly transport: TelegramTransport;
 	private readonly pool: PromptRuntimePool;
+	private readonly commands: TelegramBotCommand[] = [
+		{
+			command: "reset",
+			description: "重置当前会话",
+		},
+		{
+			command: "session",
+			description: "查看与切换会话",
+		},
+	];
 
 	constructor(options: { config: TelegramBotConfig; transport: TelegramTransport; pool: PromptRuntimePool }) {
 		this.config = options.config;
@@ -237,6 +270,7 @@ export class TelegramBotApp {
 	}
 
 	async start(): Promise<void> {
+		await this.registerCommands();
 		logInfo("bot started");
 		await this.transport.start(async (message) => {
 			await this.handleMessage(message);
@@ -268,10 +302,16 @@ export class TelegramBotApp {
 			text: text.slice(0, 80),
 		});
 
-		if (text === "/reset") {
+		const command = this.parseCommand(text);
+		if (command?.name === "reset") {
 			await this.pool.reset(message.chatId);
 			await this.transport.sendMessage(message.chatId, "会话已重置");
 			logInfo("session reset", { chatId: message.chatId, userId: message.userId });
+			return;
+		}
+
+		if (command?.name === "session" || command?.name === "sessions") {
+			await this.handleSessionCommand(message.chatId, command.args);
 			return;
 		}
 
@@ -387,6 +427,156 @@ export class TelegramBotApp {
 			active = false;
 			clearInterval(timer);
 		};
+	}
+
+	private async registerCommands(): Promise<void> {
+		try {
+			await this.transport.setCommands(this.commands);
+			logInfo("commands registered", {
+				count: this.commands.length,
+				commands: this.commands.map((command) => command.command).join(","),
+			});
+		} catch (error) {
+			logWarn("failed to register commands", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	private async handleSessionCommand(chatId: string, args: string[]): Promise<void> {
+		const action = args[0]?.toLowerCase() ?? "status";
+
+		if (action === "status" || action === "current") {
+			const overview = await this.pool.getSessionOverview(chatId);
+			await this.transport.sendMessage(chatId, this.renderSessionStatus(overview));
+			return;
+		}
+
+		if (action === "list") {
+			const overview = await this.pool.getSessionOverview(chatId);
+			await this.transport.sendMessage(chatId, this.renderSessionList(overview));
+			return;
+		}
+
+		if (action === "new") {
+			const created = await this.pool.createSession(chatId);
+			await this.transport.sendMessage(chatId, `已切换到新会话: ${created.nextSession}`);
+			return;
+		}
+
+		if (action === "use") {
+			const selector = args[1]?.trim();
+			if (!selector) {
+				await this.transport.sendMessage(chatId, "用法: /session use <编号|会话文件名>");
+				return;
+			}
+
+			const overview = await this.pool.getSessionOverview(chatId);
+			const sessionFileName = this.resolveSessionSelector(selector, overview.sessions);
+			if (!sessionFileName) {
+				await this.transport.sendMessage(chatId, `未找到会话: ${selector}`);
+				return;
+			}
+
+			const switched = await this.pool.switchSession(chatId, sessionFileName);
+			if (switched.previousSession === switched.nextSession) {
+				await this.transport.sendMessage(chatId, `当前已在会话: ${switched.nextSession}`);
+				return;
+			}
+
+			await this.transport.sendMessage(chatId, `会话已切换: ${switched.previousSession} -> ${switched.nextSession}`);
+			return;
+		}
+
+		if (action === "delete" || action === "rm") {
+			const selector = args[1]?.trim();
+			if (!selector) {
+				await this.transport.sendMessage(chatId, "用法: /session delete <编号|会话文件名>");
+				return;
+			}
+
+			const overview = await this.pool.getSessionOverview(chatId);
+			const sessionFileName = this.resolveSessionSelector(selector, overview.sessions);
+			if (!sessionFileName) {
+				await this.transport.sendMessage(chatId, `未找到会话: ${selector}`);
+				return;
+			}
+
+			const deleted = await this.pool.deleteSession(chatId, sessionFileName);
+			if (deleted.wasActive) {
+				await this.transport.sendMessage(
+					chatId,
+					`已删除当前会话: ${deleted.deletedSession}\n已切换到: ${deleted.activeSession}\n剩余会话数: ${deleted.remainingSessions.length}`,
+				);
+				return;
+			}
+
+			await this.transport.sendMessage(
+				chatId,
+				`已删除会话: ${deleted.deletedSession}\n当前会话: ${deleted.activeSession}\n剩余会话数: ${deleted.remainingSessions.length}`,
+			);
+			return;
+		}
+
+		await this.transport.sendMessage(chatId, this.renderSessionHelp());
+	}
+
+	private parseCommand(text: string): { name: string; args: string[] } | null {
+		if (!text.startsWith("/")) {
+			return null;
+		}
+
+		const segments = text.split(/\s+/).filter((segment) => segment.length > 0);
+		const firstToken = segments[0];
+		if (!firstToken) {
+			return null;
+		}
+
+		const commandWithSlash = firstToken.split("@")[0];
+		if (!commandWithSlash || commandWithSlash.length <= 1) {
+			return null;
+		}
+
+		return {
+			name: commandWithSlash.slice(1).toLowerCase(),
+			args: segments.slice(1),
+		};
+	}
+
+	private resolveSessionSelector(selector: string, sessions: string[]): string | null {
+		if (/^\d+$/.test(selector)) {
+			const index = Number.parseInt(selector, 10);
+			if (Number.isFinite(index) && index >= 1 && index <= sessions.length) {
+				return sessions[index - 1];
+			}
+		}
+
+		const matched = sessions.find((session) => session === selector);
+		return matched ?? null;
+	}
+
+	private renderSessionStatus(overview: SessionOverview): string {
+		return `当前会话: ${overview.activeSession}\n会话总数: ${overview.sessions.length}\n\n${this.renderSessionHelp()}`;
+	}
+
+	private renderSessionList(overview: SessionOverview): string {
+		const rows = overview.sessions.map((session, index) => {
+			const marker = session === overview.activeSession ? "*" : " ";
+			return `${index + 1}) [${marker}] ${session}`;
+		});
+
+		return `当前会话: ${overview.activeSession}\n\n会话列表:\n${rows.join("\n")}\n\n${this.renderSessionHelp()}`;
+	}
+
+	private renderSessionHelp(): string {
+		return [
+			"会话命令:",
+			"/session - 查看当前会话",
+			"/session list - 列出会话",
+			"/session new - 新建并切换会话",
+			"/session use <编号|文件名> - 切换会话",
+			"/session delete <编号|文件名> - 删除会话",
+		].join("\n");
 	}
 
 	private normalizeText(text: string): string {

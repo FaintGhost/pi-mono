@@ -28,6 +28,18 @@ describe("Scenario 2: 非授权或非私聊消息被静默忽略", () => {
 			reset: async () => {
 				throw new Error("reset should not be called");
 			},
+			getSessionOverview: async () => {
+				throw new Error("getSessionOverview should not be called");
+			},
+			createSession: async () => {
+				throw new Error("createSession should not be called");
+			},
+			switchSession: async () => {
+				throw new Error("switchSession should not be called");
+			},
+			deleteSession: async () => {
+				throw new Error("deleteSession should not be called");
+			},
 		} as const;
 
 		const app = new TelegramBotApp({
