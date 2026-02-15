@@ -55,6 +55,7 @@ describe("Scenario 5: /reset 执行会话轮转（软重置）", () => {
 			sessionsDir: "/workspace/data/sessions",
 			idleTtlMs: 10_000,
 			streamEditThrottleMs: 0,
+			parseMode: "Markdown",
 		};
 
 		const transport = new FakeTelegramTransport();

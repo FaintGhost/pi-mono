@@ -12,6 +12,7 @@ const config: TelegramBotConfig = {
 	sessionsDir: "/workspace/data/sessions",
 	idleTtlMs: 10_000,
 	streamEditThrottleMs: 0,
+	parseMode: "Markdown",
 };
 
 describe("Scenario 1: 白名单私聊可对话且流式更新", () => {

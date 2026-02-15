@@ -12,6 +12,7 @@ const config: TelegramBotConfig = {
 	sessionsDir: "/workspace/data/sessions",
 	idleTtlMs: 10_000,
 	streamEditThrottleMs: 0,
+	parseMode: "Markdown",
 };
 
 describe("Scenario 0: 基础运行骨架可启动", () => {

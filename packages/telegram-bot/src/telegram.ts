@@ -1,4 +1,4 @@
-import type { TelegramBotConfig } from "./config.js";
+import type { TelegramBotConfig, TelegramParseMode } from "./config.js";
 import { logError, logInfo, logWarn } from "./log.js";
 import type { PromptOptions, PromptResult } from "./runtime/agent-runtime.js";
 
@@ -52,12 +52,14 @@ export interface PromptRuntimePool {
 
 export class TelegramLongPollingTransport implements TelegramTransport {
 	private readonly apiBaseUrl: string;
+	private readonly parseMode: Exclude<TelegramParseMode, "none"> | null;
 	private running = false;
 	private nextOffset = 0;
 	private activeController: AbortController | null = null;
 
-	constructor(token: string) {
+	constructor(token: string, parseMode: TelegramParseMode = "Markdown") {
 		this.apiBaseUrl = `https://api.telegram.org/bot${token}`;
+		this.parseMode = parseMode === "none" ? null : parseMode;
 	}
 
 	async start(onMessage: (message: TelegramInboundMessage) => Promise<void>): Promise<void> {
@@ -114,7 +116,7 @@ export class TelegramLongPollingTransport implements TelegramTransport {
 	}
 
 	async sendMessage(chatId: string, text: string): Promise<number> {
-		const response = await this.callApi<TelegramSendMessageResult>("sendMessage", {
+		const response = await this.callApiWithOptionalParseMode<TelegramSendMessageResult>("sendMessage", {
 			chat_id: chatId,
 			text,
 		});
@@ -123,11 +125,18 @@ export class TelegramLongPollingTransport implements TelegramTransport {
 	}
 
 	async editMessage(chatId: string, messageId: number, text: string): Promise<void> {
-		await this.callApi("editMessageText", {
-			chat_id: chatId,
-			message_id: messageId,
-			text,
-		});
+		try {
+			await this.callApiWithOptionalParseMode("editMessageText", {
+				chat_id: chatId,
+				message_id: messageId,
+				text,
+			});
+		} catch (error) {
+			if (this.isMessageNotModifiedError(error)) {
+				return;
+			}
+			throw error;
+		}
 	}
 
 	private async getUpdates(): Promise<TelegramUpdate[]> {
@@ -144,6 +153,49 @@ export class TelegramLongPollingTransport implements TelegramTransport {
 		return response;
 	}
 
+	private async callApiWithOptionalParseMode<T>(method: string, payload: Record<string, unknown>): Promise<T> {
+		if (!this.parseMode) {
+			return this.callApi<T>(method, payload);
+		}
+
+		const payloadWithParseMode = {
+			...payload,
+			parse_mode: this.parseMode,
+		};
+
+		try {
+			return await this.callApi<T>(method, payloadWithParseMode);
+		} catch (error) {
+			if (!this.isParseEntityError(error)) {
+				throw error;
+			}
+
+			logWarn("parse mode failed, fallback to plain text", {
+				method,
+				parseMode: this.parseMode,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return this.callApi<T>(method, payload);
+		}
+	}
+
+	private isParseEntityError(error: unknown): boolean {
+		if (!(error instanceof Error)) {
+			return false;
+		}
+
+		const message = error.message.toLowerCase();
+		return message.includes("parse entities") || message.includes("parse entity");
+	}
+
+	private isMessageNotModifiedError(error: unknown): boolean {
+		if (!(error instanceof Error)) {
+			return false;
+		}
+
+		return error.message.toLowerCase().includes("message is not modified");
+	}
+
 	private async callApi<T>(method: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
 		const response = await fetch(`${this.apiBaseUrl}/${method}`, {
 			method: "POST",
@@ -154,13 +206,19 @@ export class TelegramLongPollingTransport implements TelegramTransport {
 			signal,
 		});
 
-		if (!response.ok) {
-			throw new Error(`Telegram API HTTP error: ${response.status}`);
+		let json: TelegramApiResponse<T> | null = null;
+		try {
+			json = (await response.json()) as TelegramApiResponse<T>;
+		} catch {
+			if (!response.ok) {
+				throw new Error(`Telegram API HTTP error: ${response.status}`);
+			}
+			throw new Error("Telegram API returned invalid JSON response");
 		}
 
-		const json = (await response.json()) as TelegramApiResponse<T>;
-		if (!json.ok) {
-			throw new Error(`Telegram API error: ${json.description || "unknown error"}`);
+		if (!response.ok || !json.ok) {
+			const description = json.description || `HTTP ${response.status}`;
+			throw new Error(`Telegram API error: ${description}`);
 		}
 
 		return json.result;
@@ -232,9 +290,16 @@ export class TelegramBotApp {
 		};
 
 		const enqueueRender = (textToRender: string): void => {
-			renderChain = renderChain.then(async () => {
-				await renderText(textToRender);
-			});
+			renderChain = renderChain
+				.catch((error) => {
+					logWarn("render queue recovered", {
+						chatId: message.chatId,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				})
+				.then(async () => {
+					await renderText(textToRender);
+				});
 		};
 
 		const stopTyping = this.startTypingLoop(message.chatId);
@@ -270,11 +335,24 @@ export class TelegramBotApp {
 				error: messageText,
 			});
 
-			await renderChain;
-			if (responseMessageId === null) {
-				await this.transport.sendMessage(message.chatId, `请求失败: ${messageText}`);
-			} else {
-				await this.transport.editMessage(message.chatId, responseMessageId, `请求失败: ${messageText}`);
+			await renderChain.catch((renderError) => {
+				logWarn("render queue failed during error handling", {
+					chatId: message.chatId,
+					error: renderError instanceof Error ? renderError.message : String(renderError),
+				});
+			});
+
+			try {
+				if (responseMessageId === null) {
+					await this.transport.sendMessage(message.chatId, `请求失败: ${messageText}`);
+				} else {
+					await this.transport.editMessage(message.chatId, responseMessageId, `请求失败: ${messageText}`);
+				}
+			} catch (notifyError) {
+				logError("failed to notify user about error", {
+					chatId: message.chatId,
+					error: notifyError instanceof Error ? notifyError.message : String(notifyError),
+				});
 			}
 		} finally {
 			stopTyping();

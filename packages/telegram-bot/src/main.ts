@@ -28,7 +28,7 @@ const pool = new AgentPool({
 	sessionPaths,
 });
 
-const transport = new TelegramLongPollingTransport(config.telegramBotToken);
+const transport = new TelegramLongPollingTransport(config.telegramBotToken, config.parseMode);
 const app = new TelegramBotApp({
 	config,
 	transport,
@@ -40,6 +40,7 @@ logInfo("starting", {
 	piCwd: config.piCwd,
 	sessionsDir: config.sessionsDir,
 	allowedUsers: config.allowedUserIds.size,
+	parseMode: config.parseMode,
 });
 
 const shutdown = async (): Promise<void> => {

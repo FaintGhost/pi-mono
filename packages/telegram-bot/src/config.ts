@@ -5,6 +5,8 @@ const DEFAULT_IDLE_TTL_MS = 20 * 60 * 1000;
 const DEFAULT_STREAM_EDIT_THROTTLE_MS = 600;
 const DEFAULT_ENV_FILE = ".env";
 
+export type TelegramParseMode = "none" | "Markdown" | "MarkdownV2" | "HTML";
+
 export interface TelegramBotConfig {
 	telegramBotToken: string;
 	allowedUserIds: Set<number>;
@@ -14,6 +16,7 @@ export interface TelegramBotConfig {
 	sessionsDir: string;
 	idleTtlMs: number;
 	streamEditThrottleMs: number;
+	parseMode: TelegramParseMode;
 }
 
 function parsePositiveInteger(value: string | undefined, fallback: number, key: string): number {
@@ -45,6 +48,26 @@ function parseAllowedUserIds(value: string | undefined): Set<number> {
 	}
 
 	return new Set(ids);
+}
+
+function parseParseMode(value: string | undefined): TelegramParseMode {
+	if (!value || value.trim().length === 0) {
+		return "Markdown";
+	}
+
+	const normalized = value.trim().toLowerCase();
+	switch (normalized) {
+		case "none":
+			return "none";
+		case "markdown":
+			return "Markdown";
+		case "markdownv2":
+			return "MarkdownV2";
+		case "html":
+			return "HTML";
+		default:
+			throw new Error(`Invalid TELEGRAM_PARSE_MODE: '${value}'`);
+	}
 }
 
 function resolveEnvFilePath(env: NodeJS.ProcessEnv): string {
@@ -121,5 +144,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): TelegramBotCon
 			DEFAULT_STREAM_EDIT_THROTTLE_MS,
 			"TELEGRAM_STREAM_EDIT_THROTTLE_MS",
 		),
+		parseMode: parseParseMode(mergedEnv.TELEGRAM_PARSE_MODE),
 	};
 }

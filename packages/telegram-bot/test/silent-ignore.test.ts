@@ -12,6 +12,7 @@ const config: TelegramBotConfig = {
 	sessionsDir: "/workspace/data/sessions",
 	idleTtlMs: 10_000,
 	streamEditThrottleMs: 0,
+	parseMode: "Markdown",
 };
 
 describe("Scenario 2: 非授权或非私聊消息被静默忽略", () => {

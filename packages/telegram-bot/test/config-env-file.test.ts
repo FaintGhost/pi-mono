@@ -25,6 +25,7 @@ describe("dotenv config loading", () => {
 
 		expect(config.telegramBotToken).toBe("file-token");
 		expect(Array.from(config.allowedUserIds)).toEqual([1001, 1002]);
+		expect(config.parseMode).toBe("Markdown");
 
 		await rm(workDir, { recursive: true, force: true });
 	});
@@ -42,6 +43,7 @@ describe("dotenv config loading", () => {
 
 		expect(config.telegramBotToken).toBe("env-token");
 		expect(Array.from(config.allowedUserIds)).toEqual([2002]);
+		expect(config.parseMode).toBe("Markdown");
 
 		await rm(workDir, { recursive: true, force: true });
 	});
@@ -52,7 +54,7 @@ describe("dotenv config loading", () => {
 
 		await writeFile(
 			join(workDir, "bot.env"),
-			"TELEGRAM_BOT_TOKEN=custom-token\nTELEGRAM_ALLOWED_USER_IDS=3003\n",
+			"TELEGRAM_BOT_TOKEN=custom-token\nTELEGRAM_ALLOWED_USER_IDS=3003\nTELEGRAM_PARSE_MODE=html\n",
 			"utf8",
 		);
 
@@ -62,6 +64,7 @@ describe("dotenv config loading", () => {
 
 		expect(config.telegramBotToken).toBe("custom-token");
 		expect(Array.from(config.allowedUserIds)).toEqual([3003]);
+		expect(config.parseMode).toBe("HTML");
 
 		await rm(workDir, { recursive: true, force: true });
 	});

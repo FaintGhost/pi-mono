@@ -27,6 +27,7 @@ Telegram 私聊机器人，基于 `pi --mode rpc`，复用本机 pi 的认证与
 -  `TELEGRAM_DATA_DIR`（可选，默认 `./data/telegram-bot`）
 -  `TELEGRAM_IDLE_TTL_MS`（可选，默认 `1200000`）
 -  `TELEGRAM_STREAM_EDIT_THROTTLE_MS`（可选，默认 `600`）
+-  `TELEGRAM_PARSE_MODE`（可选，默认 `Markdown`，可选：`none` / `Markdown` / `MarkdownV2` / `HTML`）
 -  `TELEGRAM_ENV_FILE`（可选，默认 `.env`，相对当前工作目录）
 
 ### .env 自动加载
@@ -39,6 +40,7 @@ Telegram 私聊机器人，基于 `pi --mode rpc`，复用本机 pi 的认证与
 TELEGRAM_BOT_TOKEN=123456:ABCDEF
 TELEGRAM_ALLOWED_USER_IDS=123456789
 PI_CWD=/root/workspace/pi-mono
+TELEGRAM_PARSE_MODE=Markdown
 ```
 
 也可以直接复制模板：
